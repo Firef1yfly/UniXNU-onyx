@@ -1,0 +1,11 @@
+# 最简单的启动菜单配置
+[boot]
+default = "xnu"   # 默认启动项的 ID
+
+[[driver]]
+path = "Drivers/DarwinBoot.efi"   # 加载 DarwinBoot 驱动
+
+[[entry]]
+id = "xnu"
+title = "UniXNU (XNU)"
+loader = "DarwinBoot"             # 指定用 DarwinBoot 来引导内核

@@ -1,0 +1,5 @@
+[[source]]
+name = "sm8735"
+kind = "soc"
+git = "file:///home/firefly/UniXNU-sm8735-common"
+commit = "d734caa7535bee2c6cce8fce0c7f50b8d829a248"
