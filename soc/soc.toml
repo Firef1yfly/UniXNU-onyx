@@ -1,0 +1,10 @@
+# Local, versioned with the device checkout; not a published/qualified SoC feed.
+# Hardware evidence: docs/STOCK-IMAGES.md (two stock base DTBs).
+schema_version = 2
+
+[soc]
+name = "SM8735"
+description = "Minimal SM8735/Tuna CPU, GICv3 and timer description; no peripheral drivers or device qualification"
+
+[components]
+include = ["ArmDTPlatform", "ArmCpu"]

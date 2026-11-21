@@ -1,5 +1,6 @@
 [[source]]
 name = "sm8735"
 kind = "soc"
-git = "file:///home/firefly/UniXNU-sm8735-common"
-commit = "d734caa7535bee2c6cce8fce0c7f50b8d829a248"
+# Development-only shared profile, tracked alongside this device.
+# No public SoC commit or hardware qualification is claimed.
+local = "soc"

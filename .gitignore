@@ -1,0 +1,13 @@
+# Machine-local inputs and identity material
+/local.toml
+/inputs.toml
+/unixnu.local.toml
+# Generated output
+/out/
+/build/
+/dist/
+__pycache__/
+*.py[cod]
+# Original stock/live evidence may contain private device identifiers
+/private-inputs/
+*.pyc

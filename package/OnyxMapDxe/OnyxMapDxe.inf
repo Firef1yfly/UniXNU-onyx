@@ -1,0 +1,21 @@
+[Defines]
+  INF_VERSION = 0x00010005
+  BASE_NAME = OnyxMapDxe
+  FILE_GUID = 4A0D0F2B-72C1-42F1-9B62-22EE8B33A3A1
+  MODULE_TYPE = DXE_DRIVER
+  VERSION_STRING = 0.1
+  ENTRY_POINT = OnyxMapDxeEntry
+[Sources]
+  OnyxMapDxe.c
+[Packages]
+  MdePkg/MdePkg.dec
+  Silicon/Qualcomm/QcomPkg/QcomPkg.dec
+[LibraryClasses]
+  UefiDriverEntryPoint
+  UefiBootServicesTableLib
+  MemoryAllocationLib
+  DebugLib
+[Protocols]
+  gEfiRamPartitionProtocolGuid
+[Depex]
+  TRUE

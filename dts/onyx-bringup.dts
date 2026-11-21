@@ -1,0 +1,33 @@
+/dts-v1/;
+/include/ "sm8735.dtsi"
+
+/ {
+    model = "Redmi Turbo 4 Pro (onyx) — provisional UniXNU bring-up";
+    /* Board identity from stock overlay; qcom,sm8735 is not fabricated. */
+    compatible = "qcom,tuna-mtp", "qcom,tuna", "qcom,tunap-mtp", "qcom,tunap", "qcom,mtp";
+    qcom,msm-id = <681 0x10000>, <655 0x10000>;
+    qcom,board-id = <8 0>;
+    xiaomi,miboard-id = <7 0>;
+
+    /* Deliberate invalid placeholder: static stock DTBs have the same zeros.
+     * Replace only from runtime onyx/UEFI memory evidence, never marketing RAM.
+     * Board stays example=true and ADT generation must reject this range.
+     */
+    memory@0 {
+        device_type = "memory";
+        reg = <0 0 0 0>;
+    };
+
+    /* Only a documented stock carveout, NOT a complete reservation inventory. */
+    reserved-memory {
+        #address-cells = <2>;
+        #size-cells = <2>;
+        ranges;
+        splash@fc800000 { reg = <0 0xfc800000 0 0x02b00000>; };
+    };
+};
+
+/* Policy, not a claim that CPU0 is the observed firmware boot MPIDR.
+ * Start with one candidate CPU; do not enable SMP before hardware validation.
+ */
+&cpu0 { status = "okay"; };

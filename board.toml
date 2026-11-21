@@ -1,11 +1,11 @@
 schema_version = 2
 
 [board]
-example = false
+example = true
 name = "onyx"
 soc = "SM8735"
 soc_source = "sm8735"
-os_profile = "ios-17.7.11-21H461"
+os_profile = "ipados-17.7.11-21H461"
 description = "Redmi Turbo 4 Pro"
 kit = "onyx"
 
@@ -13,12 +13,12 @@ kit = "onyx"
 include = ["ArmDTPlatform", "ArmCpu", "SoftwareAES", "XnuPrelink", "DarwinBoot"]
 
 [kernel]
-defconfig = "example_defconfig"
-config_fragments = ["arch:configs/common.config", "soc:configs/sm8735.config", "os:configs/ios.config"]
+defconfig = "onyx_defconfig"
+config_fragments = ["arch:configs/common.config", "soc:configs/sm8735.config", "os:configs/ipados.config"]
 patch_series = ["arch:patches/xnu/series", "soc:patches/xnu/series", "os:patches/xnu/series", "device:patches/xnu/series"]
 
 [device_tree]
-source = "device:dts/onyx.dts"
+source = "device:dts/onyx-bringup.dts"
 include_dirs = ["soc:dts"]
 
 [firmware]
@@ -42,7 +42,12 @@ packages = [
 ]
 
 [bootimg]
-# dtb = "build/onyx/onyx.dtb"
+# Firmware boot DTB selection is unresolved; never use the minimal ADT hardware DTS here.
+
+[bootimg.image]
+# Current UniXNU reads this table, not Mu's [boot_image_kernel].
+# Match the onyx firmware source's uncompressed BootShim requirement explicitly.
+kernel_compression = "none"
 
 [firmware.defines]
 DEVICE_MODEL = "onyx"
@@ -56,28 +61,12 @@ title = "UniXNU"
 kernel_args = ["-v", "serial=3"]
 
 [package]
-unixnu = "../UniXNU"
+unixnu = "../unixnu"
 
 [package.defconfig]
-"ios-17.7.11-21H461" = "example_defconfig"
+"ipados-17.7.11-21H461" = "onyx_defconfig"
 
 [payload.adt]
 chip_id = "207"
-unique_chip_id = "0x1234567890abcdef"
-
-# 定义 UEFI 启动菜单
-[unixnu_toml]
-
-# 定义默认启动项
-[unixnu_toml.boot]
-default = "xnu"
-
-# 定义驱动加载
-[[unixnu_toml.driver]]
-path = "Drivers/DarwinBoot.efi"
-
-# 定义内核启动项
-[[unixnu_toml.entry]]
-id = "xnu"
-title = "UniXNU (XNU)"
-loader = "DarwinBoot" # 与上面的驱动对应
+# Identity seed must be supplied locally; never commit a value.
+unique_chip_id = "required"

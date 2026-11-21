@@ -1,48 +1,48 @@
 schema_version = 1
 
 [device]
-name = "example"
-soc = "SM8550"
+name = "onyx"
+soc = "SM8735"
 os_profile = "ipados-17.7.11-21H461"
-summary = "Device template. Complete each area with board-specific inputs and evidence."
+summary = "Evidence-first Redmi Turbo 4 Pro (onyx) reconstruction; no device boot is claimed."
 
 [[area]]
 id = "configuration"
 status = "planned"
 components = ["ArmDTPlatform", "ArmCpu", "SoftwareAES", "XnuPrelink", "DarwinBoot"]
-paths = ["board.toml", "feeds.toml", "configs/**", ".gitmodules", ".github/**", ".gitignore"]
-inputs = ["Identify the configuration hardware, resources and existing component interfaces for this board."]
-configuration = ["Record the board.toml fields, DTS properties and defconfig values used for configuration."]
-procedure = ["Follow the configuration stage in the porting guide and record the actual commands."]
-findings = ["Collect the first configuration observation, its cause when established, and the resulting implementation decision."]
+paths = ["scripts/extract-images.py", "scripts/inspect-runtime.py", "scripts/CPUID*", "tests/**", "docs/CPUID-PLATFORM-SEED.md", "board.toml", "feeds.toml", "configs/**", "soc/soc.toml", "soc/configs/**", "soc/patches/**", ".gitmodules", ".github/**", ".gitignore"]
+inputs = ["onyx SM8735 source graph, an existing upstream OS profile and real board hardware evidence; see docs/ONYX-REBUILD.md."]
+configuration = ["Use ipados-17.7.11-21H461 and onyx_defconfig with tracked local soc/; keep board.example=true until runtime DRAM and the full build source graph are qualified."]
+procedure = ["Run python3 scripts/check-inputs.py --unixnu ../unixnu, then the independent upstream porting-record check; the former is expected to fail closed."]
+findings = ["The official package --check is intentionally blocked while board.example=true; the fail-closed input gate also reports missing inputs.toml provenance and unresolved static DRAM. The provisional DTS compiles to a 2.1 KiB host DTB only; this is not a boot image or runtime memory evidence."]
 completion = ["All source pins resolve; every selected component has a record; status shows the intended overrides and patch order."]
-limits = ["Hardware inputs and implementation are pending for this example board."]
-next_action = ["Inventory the required configuration inputs before implementation."]
-evidence = []
+limits = ["The local SoC source is minimal, not a complete platform; runtime memory, full source fetch and firmware qualification remain missing."]
+next_action = ["Review source availability and runtime DRAM evidence, then verify UEFI handoff and complete kernel build inputs without disabling the board gate."]
+evidence = [{ kind = "source", reference = "docs/ONYX-REBUILD.md", result = "Records pinned vendor source and the missing local SoC inputs." }]
 
 [[area]]
 id = "firmware"
 status = "planned"
 components = []
-paths = ["proprietary-files.txt", "scripts/extract-files.py", "scripts/gen-touch-firmware.py"]
+paths = ["patches/uefi/**", "package/OnyxMapDxe/**", "package/OnyxBootOptions/**", "tests/test_bootshim_patch.py", "docs/BDS-ONIX-CANDIDATE.md", "docs/BDS-ISOLATED-BUILD.md", "docs/BDS-CANDIDATE-IMAGE.md", "docs/HISTORICAL-COMBO-BOOT-TEST.md", "docs/DIAGNOSTIC-BOOT.md", "docs/DEVICE-DIAGNOSTIC-FAILURE.md", "docs/EFI-MAP-DIAGNOSTIC-RESULT.md", "docs/QR-ADVANCED-LOGGER-INTEGRATION.md", "proprietary-files.txt", "scripts/extract-files.py", "scripts/gen-touch-firmware.py"]
 inputs = ["Identify the firmware and boot hardware, resources and existing component interfaces for this board."]
-configuration = ["Record the board.toml fields, DTS properties and defconfig values used for firmware and boot."]
-procedure = ["Follow the firmware and boot stage in the porting guide and record the actual commands."]
-findings = ["Collect the first firmware and boot observation, its cause when established, and the resulting implementation decision."]
+configuration = ["Keep firmware selection and board.example protection; explicitly set bootimg.image.kernel_compression=none. The candidate BootShim source patch is not auto-applied or device-qualified."]
+procedure = ["Run offline BootShim patch tests, review docs/UEFI-HANDOFF.md, and capture runtime FDT/initrd plus EFI descriptors before any real boot attempt."]
+findings = ["Mu-first BDS candidate uses board-local PlatformBootOptionsLib linked into the BDS static library list (active UniXNU FV app + hidden Mass Storage), with SEC-safe serial DebugLib. Final temporary FD build succeeds SHA-256 7910f75c3cbbcd3db12d90a6208a6a6edb6e65e920898656900aa8235d6775ea; FV includes UniXNU application, UniXNUDxe, OnyxMapDxe and AdvancedLogDxe. No final device retest yet. See docs/BDS-ONIX-CANDIDATE.md."]
 completion = ["Firmware image builds, enters UniXNU, publishes the framebuffer and preserves the documented memory reservations."]
-limits = ["Hardware inputs and implementation are pending for this example board."]
-next_action = ["Inventory the required firmware and boot inputs before implementation."]
-evidence = []
+limits = ["No FD or boot image has been validated. x0/runtime DRAM, initrd address and placement, preservation through SEC/DXE, and live dispatch are unmeasured."]
+next_action = ["Gather runtime FDT, EFI descriptor and RAM-partition evidence; define early ownership for FDT/initrd buffers before changing dispatch or attempting an image."]
+evidence = [{ kind = "source", reference = "docs/ANDROID17-RAMDISK.md", result = "Vendor boot layout and compressed vendor ramdisk were inspected without claiming UniXNU payload discovery." }, { kind = "source", reference = "docs/UEFI-HANDOFF.md", result = "Source audit and actual BootShim header failure/fix reproduced in a temporary host copy." }]
 
 [[area]]
 id = "cpu"
 status = "planned"
 components = []
-paths = ["package/CpuFreq*", "scripts/*armcpu*"]
+paths = ["soc/dts/**", "package/CpuFreq*", "scripts/*armcpu*"]
 inputs = ["Identify the cpu and interrupts hardware, resources and existing component interfaces for this board."]
 configuration = ["Record the board.toml fields, DTS properties and defconfig values used for cpu and interrupts."]
 procedure = ["Follow the cpu and interrupts stage in the porting guide and record the actual commands."]
-findings = ["Collect the first cpu and interrupts observation, its cause when established, and the resulting implementation decision."]
+findings = ["Current Android 17 and historical Android 16 base/merged trees agree on CPU affinities 0x0..0x700, GIC 0x17100000/0x17180000 with stride 0x40000, 19.2 MHz timer and PSCI smc. These bindings are transcribed into soc/dts/sm8735.dtsi; only candidate CPU0 is enabled, not a measured boot affinity. Device interrupt/SMP behavior is unverified."]
 completion = ["Every enabled CPU reaches its entry checkpoint and timer/IPI handling works on each enabled CPU."]
 limits = ["Hardware inputs and implementation are pending for this example board."]
 next_action = ["Inventory the required cpu and interrupts inputs before implementation."]
@@ -52,15 +52,15 @@ evidence = []
 id = "memory"
 status = "planned"
 components = []
-paths = ["dts/**", "package/*Smmu*", "package/*Memory*", "scripts/*smmu*", "scripts/*memory*"]
+paths = ["dts/**", "scripts/inspect-memory.py", "scripts/inspect-runtime.py", "tests/test_inspect_memory.py", "tests/test_handoff_plan.py", "package/HandoffPlan/**", "package/*Smmu*", "package/*Memory*", "scripts/*smmu*", "scripts/*memory*"]
 inputs = ["Identify the memory and dma hardware, resources and existing component interfaces for this board."]
 configuration = ["Record the board.toml fields, DTS properties and defconfig values used for memory and dma."]
 procedure = ["Follow the memory and dma stage in the porting guide and record the actual commands."]
-findings = ["Collect the first memory and dma observation, its cause when established, and the resulting implementation decision."]
+findings = ["HandoffPlan C code checks copied header bounds, page rounding, verified spans and forbidden overlaps without physical reads or HOB writes. KernelSU read-only capture confirms runtime Onyx/SM8735 identity and initrd 0xb5921000..0xb7ffeb04 reserved in /proc/iomem, but fragmented memory/reg is not a clean ADT range. The complete onyx runtime FDT independently matches the public luming SM8735 CPU/GIC/timer/UFS/SMMU/UART/GPU register facts and the Android System RAM run 0x8c0000000..0xaffffefff. Onyx /proc/iomem also reserves the upper part beginning at 0xaeec08000, so luming's full 0x23ffff000 window is not copied. A 2 MiB-aligned pre-reservation candidate 0x8c0000000 + 0x22ec00000 is recorded only for later EFI-map comparison, not selected for ADT. See docs/RUNTIME-ANDROID17.md and docs/bringup/cross-device-reuse.md."]
 completion = ["All handoff regions are accounted for and each enabled DMA engine accesses its allocated range with the documented cache policy."]
-limits = ["Hardware inputs and implementation are pending for this example board."]
-next_action = ["Inventory the required memory and dma inputs before implementation."]
-evidence = []
+limits = ["Runtime capture is property/iomem evidence, not a byte FDT or EFI memory map; zero-size and fragmented memory entries require UEFI/RAM-partition correlation. No device boot capability is verified."]
+next_action = ["Correlate initrd reservation and usable RAM spans with Mu-Silicium EFI descriptors; obtain full runtime FDT or equivalent bounded capture before updating board DTS."]
+evidence = [{ kind = "source", reference = "docs/RUNTIME-ANDROID17.md", result = "KernelSU read-only capture records runtime identity, memory/reg tuples, initrd start/end and /proc/iomem reservation." }]
 
 [[area]]
 id = "storage"
@@ -70,7 +70,7 @@ paths = ["drivers/ShengUfs", "scripts/*ufs*", "scripts/*storage*", "scripts/*use
 inputs = ["Identify the storage and root hardware, resources and existing component interfaces for this board."]
 configuration = ["Record the board.toml fields, DTS properties and defconfig values used for storage and root."]
 procedure = ["Follow the storage and root stage in the porting guide and record the actual commands."]
-findings = ["Collect the first storage and root observation, its cause when established, and the resulting implementation decision."]
+findings = ["The onyx overlay changes /soc/ufshc@1d84000 from disabled to ok on both base DTBs. Static HCI range is 0x1d84000/0x3000 and interrupt tuple is <0 265 4>; this does not establish an XNU driver, GPT geometry or root mount."]
 completion = ["Host: register, clock, link and SMMU facts match the board inventory.", "Reads: SCSI capacity, GPT and known blocks are correct; OS/SystemOS windows stay within userdata.", "Root: the configured volume mounts and launchd starts. Persistence: writes survive reboot within the allocated Data region."]
 limits = ["Hardware inputs and implementation are pending for this example board."]
 next_action = ["Inventory the required storage and root inputs before implementation."]
@@ -98,7 +98,7 @@ paths = ["drivers/ShengHidInput", "drivers/ShengNovatekTouch", "package/*Touch*"
 inputs = ["Identify the input hardware, resources and existing component interfaces for this board."]
 configuration = ["Record the board.toml fields, DTS properties and defconfig values used for input."]
 procedure = ["Follow the input stage in the porting guide and record the actual commands."]
-findings = ["Collect the first input observation, its cause when established, and the resulting implementation decision."]
+findings = ["The supplied onyx overlay enables novatek,NVT-ts-spi at SPI 0xa90000 chip select 0 with a GPIO78 interrupt specifier. This static binding is not evidence of touch firmware compatibility or working XNU HID events."]
 completion = ["Touches map to the display, simultaneous contacts keep stable IDs, release events arrive, and buttons produce expected HID reports."]
 limits = ["Hardware inputs and implementation are pending for this example board."]
 next_action = ["Inventory the required input inputs before implementation."]
@@ -112,7 +112,7 @@ paths = ["package/*Gpu*", "package/*Gmu*", "package/*Adreno*", "scripts/*adreno*
 inputs = ["Identify the gpu hardware, resources and existing component interfaces for this board."]
 configuration = ["Record the board.toml fields, DTS properties and defconfig values used for gpu."]
 procedure = ["Follow the gpu stage in the porting guide and record the actual commands."]
-findings = ["Collect the first gpu observation, its cause when established, and the resulting implementation decision."]
+findings = ["Both offline merged trees identify qcom,adreno-gpu-gen8-6-0. Do not select the upstream A740/SM8550 implementation merely because both are named Adreno; generation, firmware and ABI adaptation remain open."]
 completion = ["GPU submissions complete, mapping/fence handling is correct, a known image renders, and the selected Metal client presents it."]
 limits = ["Hardware inputs and implementation are pending for this example board."]
 next_action = ["Inventory the required gpu inputs before implementation."]
@@ -164,7 +164,7 @@ evidence = []
 id = "packaging"
 status = "planned"
 components = []
-paths = ["scripts/*payload*", "scripts/*image*", "scripts/*flash*", "patches/**", "package/Kit.toml"]
+paths = ["scripts/*payload*", "scripts/*image*", "scripts/*flash*", "scripts/make-menu-payload.py", "docs/COMPLETE-IMAGE-GATE.md", "docs/QR-MENU-DIAGNOSTIC.md", "docs/QR-RAMDISK-FIRST-IMAGE.md", "patches/**", "package/Kit.toml"]
 inputs = ["Identify the image assembly hardware, resources and existing component interfaces for this board."]
 configuration = ["Record the board.toml fields, DTS properties and defconfig values used for image assembly."]
 procedure = ["Follow the image assembly stage in the porting guide and record the actual commands."]
@@ -178,11 +178,11 @@ evidence = []
 id = "diagnostics"
 status = "planned"
 components = []
-paths = ["scripts/check-*", "scripts/probe-*", "scripts/audit-*", "scripts/read-*", "scripts/prepare-*", "scripts/data/**", "package/tests/**", "package/*Tests*", "package/*Diagnostic*", "package/*Probe*", "package/Boot*", "package/linux-log/**", "unixnu.lock"]
+paths = ["scripts/check-inputs.py", "tests/**", "docs/**", "inputs.toml", "scripts/check-*", "scripts/probe-*", "scripts/audit-*", "scripts/read-*", "scripts/prepare-*", "scripts/data/**", "package/tests/**", "package/*Tests*", "package/*Diagnostic*", "package/*Probe*", "package/Boot*", "package/linux-log/**", "unixnu.lock"]
 inputs = ["Identify the diagnostics hardware, resources and existing component interfaces for this board."]
 configuration = ["Record the board.toml fields, DTS properties and defconfig values used for diagnostics."]
 procedure = ["Follow the diagnostics stage in the porting guide and record the actual commands."]
-findings = ["Collect the first diagnostics observation, its cause when established, and the resulting implementation decision."]
+findings = ["Offline check-inputs.py rejects incomplete sources, zero-size literal memory, fixed identity seeds and missing board provenance. Synthetic unit tests are not hardware evidence; every subsystem remains planned."]
 completion = ["Each claimed milestone has a reproducible command, a matching source/image revision and an accessible result."]
 limits = ["Hardware inputs and implementation are pending for this example board."]
 next_action = ["Inventory the required diagnostics inputs before implementation."]

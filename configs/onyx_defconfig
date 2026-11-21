@@ -1,0 +1,9 @@
+# Provisional minimal bring-up configuration, not hardware-qualified.
+# UFS/GPU stay disabled until SM8735 implementations and board inputs are reviewed.
+CONFIG_XNU_SOURCE_CORECRYPTO14=y
+CONFIG_XNU_SOURCE_PTHREAD=y
+CONFIG_XNU_ARM_DT_PLATFORM=y
+CONFIG_XNU_ARMCPU=y
+CONFIG_XNU_CRYPTO_BOOTSTRAP="prelinked"
+# CONFIG_XNU_NATIVE_UFS is not set
+# CONFIG_XNU_NATIVE_ADRENO is not set

@@ -1,0 +1,21 @@
+[Defines]
+  INF_VERSION = 0x00010005
+  BASE_NAME = OnyxBootOptions
+  FILE_GUID = 6B4B2CE1-9F65-4A31-8DD9-5D8C0F17C1A0
+  MODULE_TYPE = DXE_DRIVER
+  VERSION_STRING = 0.1
+  LIBRARY_CLASS = PlatformBootOptionsLib|DXE_DRIVER
+[Sources]
+  OnyxBootOptions.c
+[Packages]
+  MdePkg/MdePkg.dec
+  SiliciumPkg/SiliciumPkg.dec
+  QcomPkg/QcomPkg.dec
+  UniXNUPkg/UniXNUPkg.dec
+[LibraryClasses]
+  DebugLib
+  MemoryAllocationLib
+  PcdLib
+[FixedPcd]
+  gQcomPkgTokenSpaceGuid.PcdMassStorageFile
+  gUniXNUPkgTokenSpaceGuid.PcdUniXNUApplicationFile
