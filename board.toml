@@ -1,7 +1,7 @@
 schema_version = 2
 
 [board]
-example = true
+example = false
 name = "onyx"
 soc = "SM8735"
 soc_source = "sm8735"
