@@ -41,7 +41,7 @@ python3 scripts/device-ladder.py probe
 # 1-2. One attempt, bound to one hash, from a fresh bootloader.
 python3 scripts/device-ladder.py boot \
   --image /home/firefly/文档/onyx-porting/out/onyx-menu-boot.img \
-  --confirm-sha256 a4c34dd2e2b97cc087321bcf7ad84d3eeaec2ff878cb1f1b29ce8bd5032f32d5 \
+  --confirm-sha256 9a77313f673c33270d20786550da1865026fa25612258f1eaa15c22cacc04470 \
   --cold-restart
 ```
 

@@ -28,6 +28,10 @@
 #   no connection there is no filesystem at all. DeviceBootManagerAfterConsole()
 #   therefore connects the block devices first and logs how many filesystems
 #   exist afterwards, which is the bring-up signal for milestone step 5.
+# Input as well as storage: SiliciumPkg.dsc.inc sets PcdConInConnectOnDemand, so
+#   BdsEntry connects only ConOut and ErrOut before this hook and leaves every
+#   input device for the lazy path. Without connecting ConIn the menu would
+#   appear and ignore the keys.
 # Limits: LoadImage(TRUE, gImageHandle, NULL, ...) needs the application and BDS
 #   in the same firmware volume, as 0012 does; image authentication is unchanged.
 #   The application is started at most once per boot. If it returns, the status
@@ -39,10 +43,10 @@
 #   writes nothing through it.
 diff --git a/Platforms/Xiaomi/onyxPkg/Library/DeviceBootManagerLib/DeviceBootManagerLib.c b/Platforms/Xiaomi/onyxPkg/Library/DeviceBootManagerLib/DeviceBootManagerLib.c
 new file mode 100644
-index 0000000..bdc394c
+index 0000000..d9b1ee9
 --- /dev/null
 +++ b/Platforms/Xiaomi/onyxPkg/Library/DeviceBootManagerLib/DeviceBootManagerLib.c
-@@ -0,0 +1,317 @@
+@@ -0,0 +1,352 @@
 +/** @file
 +  onyx device boot manager.
 +
@@ -95,6 +99,7 @@ index 0000000..bdc394c
 +#include <Library/DeviceBootManagerLib.h>
 +#include <Library/MemoryAllocationLib.h>
 +#include <Library/PcdLib.h>
++#include <Library/UefiBootManagerLib.h>
 +#include <Library/UefiBootServicesTableLib.h>
 +#include <Library/UefiLib.h>
 +#include <Pi/PiFirmwareFile.h>
@@ -102,6 +107,7 @@ index 0000000..bdc394c
 +#include <Protocol/FirmwareVolume2.h>
 +#include <Protocol/LoadedImage.h>
 +#include <Protocol/SimpleFileSystem.h>
++#include <Protocol/SimpleTextIn.h>
 +#endif
 +
 +#define ONYX_BOOT_PREFIX  "ONYX-BOOT: ac: "
@@ -193,6 +199,38 @@ index 0000000..bdc394c
 +  }
 +
 +  DEBUG ((DEBUG_ERROR, ONYX_BOOT_PREFIX "filesystems after connect: %u\n", Filesystems));
++}
++
++//
++// Same reason as ConnectBlockDevices(), one layer up: SiliciumPkg.dsc.inc sets
++// PcdConInConnectOnDemand, so BdsEntry connects only ConOut and ErrOut before
++// calling this hook and leaves every input device for the lazy path. The menu
++// would appear and ignore the keys. Connecting ConIn here is exactly what
++// EfiBootManagerConnectAllDefaultConsoles() would have done.
++//
++STATIC
++VOID
++ConnectConsoleInput (
++  VOID
++  )
++{
++  EFI_HANDLE  *Handles;
++  UINTN       Count;
++  UINTN       Inputs;
++  EFI_STATUS  Status;
++
++  EfiBootManagerConnectConsoleVariable (ConIn);
++
++  Handles = NULL;
++  Count   = 0;
++  Inputs  = 0;
++  Status  = gBS->LocateHandleBuffer (ByProtocol, &gEfiSimpleTextInProtocolGuid, NULL, &Count, &Handles);
++  if (!EFI_ERROR (Status)) {
++    Inputs = Count;
++    FreePool (Handles);
++  }
++
++  DEBUG ((DEBUG_ERROR, ONYX_BOOT_PREFIX "input devices after connect: %u\n", Inputs));
 +}
 +
 +STATIC
@@ -298,6 +336,7 @@ index 0000000..bdc394c
 +
 +  mApplicationStarted = TRUE;
 +  ConnectBlockDevices ();
++  ConnectConsoleInput ();
 +  File                = (CONST EFI_GUID *)PcdGetPtr (PcdUniXNUApplicationFile);
 +  Status              = StartApplication (File);
 +
@@ -362,10 +401,10 @@ index 0000000..bdc394c
 +}
 diff --git a/Platforms/Xiaomi/onyxPkg/Library/DeviceBootManagerLib/DeviceBootManagerLib.inf b/Platforms/Xiaomi/onyxPkg/Library/DeviceBootManagerLib/DeviceBootManagerLib.inf
 new file mode 100644
-index 0000000..fce92c2
+index 0000000..4265327
 --- /dev/null
 +++ b/Platforms/Xiaomi/onyxPkg/Library/DeviceBootManagerLib/DeviceBootManagerLib.inf
-@@ -0,0 +1,40 @@
+@@ -0,0 +1,42 @@
 +## @file
 +#  onyx device boot manager: hands control from platform BDS to UniXNU.
 +#
@@ -395,6 +434,7 @@ index 0000000..fce92c2
 +  DebugLib
 +  MemoryAllocationLib
 +  PcdLib
++  UefiBootManagerLib
 +  UefiBootServicesTableLib
 +  UefiLib
 +
@@ -403,6 +443,7 @@ index 0000000..fce92c2
 +  gEfiFirmwareVolume2ProtocolGuid  ## CONSUMES
 +  gEfiLoadedImageProtocolGuid      ## CONSUMES
 +  gEfiSimpleFileSystemProtocolGuid ## CONSUMES
++  gEfiSimpleTextInProtocolGuid     ## CONSUMES
 +
 +[Pcd]
 +  gUniXNUPkgTokenSpaceGuid.PcdUniXNUApplicationFile  ## CONSUMES

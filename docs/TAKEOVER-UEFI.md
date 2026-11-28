@@ -768,6 +768,24 @@ network and display controllers stay on the path BDS would have taken. The
 filesystem count is the point — `0` means the next log lines cannot be about the
 menu, and the payload discovery chain (design 2.5) is where to look.
 
+### The same gap one layer up: no input device is connected either
+
+`SiliciumPkg.dsc.inc` sets `PcdConInConnectOnDemand` to `TRUE`, so in `BdsEntry`
+the console step connects `ConOut` and `ErrOut` only — "Do not connect ConIn
+devices when lazy ConIn feature is ON" — and the ConIn devices registered by
+`PlatformBootManagerBeforeConsole()` (`KeypadDevicePath`, `UsbKeyboardDevicePath`)
+stay unconnected until the lazy path fires on a key wait. Starting the application
+from the hook therefore produced a menu that draws and ignores every key.
+
+`DeviceBootManagerAfterConsole()` now calls
+`EfiBootManagerConnectConsoleVariable (ConIn)` — exactly what
+`EfiBootManagerConnectAllDefaultConsoles()` would have done — and logs the number
+of `SimpleTextIn` handles that exist afterwards:
+
+```text
+ONYX-BOOT: ac: input devices after connect: 1
+```
+
 One assumption is stated rather than proved: the payload volume is a bare FAT
 filesystem with no partition table (`mformat -i`), and `FatDxe` mounts a
 partition-less superfloppy directly while `PartitionDxe` finds nothing to create.
@@ -777,11 +795,15 @@ partitioned image, not a firmware change.
 
 ### Rebound artefacts
 
-FD `13fb233b585b05d08f68f5124a0e737f37561553eb085a61714fccede0d3880d` (3,145,728
-bytes, 9 accepted modules, 14 of 14 SEC guard markers, 12 `ONYX-BOOT: ac: `
-markers in the inner volume). Menu image `out/onyx-menu-boot.img`, 20,779,008
-bytes, SHA-256 `a4c34dd2e2b97cc087321bcf7ad84d3eeaec2ff878cb1f1b29ce8bd5032f32d5`,
-shelved as `out/onyx-menu-boot-a4c34dd2.img`; its kernel field re-hashes to that FD
-at shim offset 256 and its `text_offset` is zero. The nine-patch series still
-replays onto the pins byte-identically with this change. None of it has run on
-hardware.
+FD `fdc70a6b7c5475eda166d68db48ca7009db0c7d96bf4ff92ab6a8ef8d6b32f41` (3,145,728
+bytes, 9 accepted modules, 14 of 14 SEC guard markers, 13 `ONYX-BOOT: ac: `
+markers in the inner volume, including the filesystem and input counts). Menu
+image `out/onyx-menu-boot.img`, 20,779,008 bytes, SHA-256
+`9a77313f673c33270d20786550da1865026fa25612258f1eaa15c22cacc04470`, shelved as
+`out/onyx-menu-boot-9a77313f.img`; its kernel field re-hashes to that FD at shim
+offset 256 and its `text_offset` is zero. The nine-patch series still replays onto
+the pins byte-identically with this change. None of it has run on hardware.
+
+The two earlier packs from this round stay named rather than replaced: FD
+`13fb233b` with image `a4c34dd2` (block devices only) and FD `7ca3fe22` with image
+`83e75046` (before the connection step). A device attempt names one artefact pair.
