@@ -1,8 +1,8 @@
 # UniXNU — Redmi Turbo 4 Pro (onyx)
 
-**Experimental reconstruction. No successful UEFI boot is claimed yet.** The original
-configuration remains in `origin/main`; development happens on
-`port/onyx-uefi-handoff`. Nothing has been flashed.
+**Experimental reconstruction. No successful UEFI boot is claimed yet** — the boot
+loader accepts the image but the firmware has not been observed running. Nothing
+has been flashed; every device test used `fastboot boot` only.
 
 ## Current scope
 
