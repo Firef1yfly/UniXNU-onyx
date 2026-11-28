@@ -1,7 +1,7 @@
 {
   "artifact": "/home/firefly/\u6587\u6863/onyx-porting/Mu-Silicium/Build/onyxPkg/DEBUG_CLANGPDB/FV/SILICIUM_UEFI.fd",
   "fd_bytes": 3145728,
-  "fd_sha256": "d1ceaae4a58a6042e2b9d704fb7d87189bf94e5a8ca7c5431d766ab708cdf811",
+  "fd_sha256": "7ca3fe22bea67afb9d0cebe15b616dc110fb8810938470a67dbe8c827c824fb1",
   "hardware_tested": false,
   "modules": {
     "AdvancedLogDxe": {
@@ -87,7 +87,7 @@
     }
   },
   "nested_fv": {
-    "compressed_bytes": 1271647,
+    "compressed_bytes": 1271709,
     "compression_guid": "EE4E5898-3914-4259-9D6E-DC7BD79403CF",
     "decoded_bytes": 8605704,
     "inner_ffs_count": 110,

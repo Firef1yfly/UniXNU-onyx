@@ -1,5 +1,52 @@
 # Host verification
 
+This file records what a host can check about this port, and what each check does
+**not** establish. Device results live in [the takeover record](TAKEOVER-UEFI.md);
+nothing here is a boot claim.
+
+## Matrix, 2026-11-29 (last run)
+
+Run from the device repository with `UNIXNU_HOME` and `UNIXNU_UEFI` naming the two
+checkouts. Every line below was executed; the columns say what it proves and what
+it does not.
+
+| Check | Command | Result | Proves | Does not prove |
+| --- | --- | --- | --- | --- |
+| Host suite | `python3 -m unittest discover -s tests -p 'test_*.py'` | 203 tests, OK (13 skipped: they need an upstream checkout or the live Mu tree) | the scripts and the record behave as their tests say | anything about the phone |
+| Series endpoint | `python3 scripts/check-firmware-inputs.py` | 5 ok: 19 Mu files at the blob endpoint of all 9 patches, 8 FDF modules, DSC alignment + guard switch, 3 MiB at 0xA7100000 uncompressed v4, both compression settings `none` | the source tree is the reviewed series | that a volume built from it boots |
+| FD acceptance | `python3 scripts/accept-firmware.py --fd …/SILICIUM_UEFI.fd --json …` | FD `7ca3fe22…`, 6 outer and 110 inner FFS files, 9 required modules, 14 of 14 SEC guard markers, `hardware_tested: false` | the volume's structure and module set, read from the bytes | authentication, dispatch, memory safety |
+| Payload contract | `python3 scripts/check-payload-config.py …/unixnu.toml --unixnu …` | `keys and actions match Config.c` | the menu config only uses keys the firmware parses | that the menu is reachable |
+| Input gate | `python3 scripts/check-inputs.py --unixnu …` | exit 1: 18 `[OK]`, `board.example` must be false after inputs complete, DTS memory unconfirmed | the gate still fails closed | nothing; it is meant to fail |
+| Porting record | `python3 …/scripts/porting-record.py check --device . --base origin/main` | `onyx: 13 structured areas checked` | every area owns paths, cites existing evidence, and is in step with the push range | that any area is device-verified |
+| Board resolution | `./unixnu status --json` | resolves the board, 21 modules, `board.example: true` | the official CLI reads this repository | a bootable configuration |
+| Series replay | 9 patches applied in order to trees seeded from the pins, then compared | all 19 Mu files and both UniXNU files byte-identical | this repository alone reaches the tested source state | that the build is reproducible (it is not: see below) |
+
+Artefacts those checks bind: menu image `out/onyx-menu-boot.img`, 20,779,008
+bytes, SHA-256 `83e75046304d6983a6e211e445737e1917d24c35f06e48f7be7e84deb6b492df`,
+carrying FD `7ca3fe22…` at shim offset 256 with `text_offset` zeroed from
+`0xa7100000`; and the earlier pack `fc9374e4…`/`d1ceaae4…`. Two builds of identical
+sources differ in exactly eight bytes (the `PcdDxe` CodeView record), so a result
+belongs to one artefact hash and never to "the current image".
+
+## What remains outside host reach
+
+The milestone — one image hash cold-booting to an interactive UniXNU menu three
+times, with a saved log for each run — is measured on the phone. So is every claim
+about GOP, input, the payload volume being listed and the QR log export. The
+ladder harness (`scripts/device-ladder.py`) exists to record those attempts;
+`docs/bringup/ladder.md` states what each verdict does and does not mean.
+
+---
+
+# Historical rounds
+
+The sections below are dated host-side records from before the takeover. Their
+conclusions have been superseded where the takeover record says so — in
+particular, runtime FDT/initrd ownership, the EFI memory picture and the fact that
+the firmware executes on the device were all established later. They are kept
+because each one records a failure and its cause, which is what made the current
+tree possible.
+
 ## Round 18 runtime ADT gate
 
 The complete privileged runtime FDT was passed directly to `scripts/make-adt.py` with the runtime-derived platform seed. The converter rejected it before writing an ADT:
