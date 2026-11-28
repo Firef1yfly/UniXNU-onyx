@@ -1,19 +1,26 @@
 #!/usr/bin/env python3
 """The payload checker must reject configs the firmware silently ignores."""
 import importlib.util
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 DEVICE = HERE.parent
+sys.path.insert(0, str(HERE))
+from host_fixtures import upstream  # noqa: E402  (sibling helper, not a test module)
+
 SPEC = importlib.util.spec_from_file_location("payload_check", DEVICE / "scripts/check-payload-config.py")
 CHECK = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(CHECK)
-CONFIG_C = DEVICE.parent / "UniXNU/package/UniXNUPkg/Library/UniXNULib/Config.c"
+# The checker is diffed against the upstream firmware parser, which lives in the
+# UniXNU checkout (UNIXNU_HOME, else a sibling ../UniXNU).
+UPSTREAM, UPSTREAM_SKIP = upstream("package/UniXNUPkg/Library/UniXNULib/Config.c")
+CONFIG_C = None if UPSTREAM is None else UPSTREAM / "package/UniXNUPkg/Library/UniXNULib/Config.c"
 
 
-@unittest.skipUnless(CONFIG_C.is_file(), "UniXNU parser source not available")
+@unittest.skipIf(CONFIG_C is None, UPSTREAM_SKIP)
 class PayloadConfigTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

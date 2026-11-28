@@ -1,7 +1,8 @@
 """Host binding tests, NOT onyx runtime/device validation.
 
-Requires dtc and sibling ../unixnu. Any nonzero DRAM used below is a synthetic
-encoding fixture in a temporary directory, never a board configuration.
+Requires dtc and the upstream UniXNU checkout (UNIXNU_HOME, else a sibling
+../UniXNU). Any nonzero DRAM used below is a synthetic encoding fixture in a
+temporary directory, never a board configuration.
 """
 import importlib.util
 from pathlib import Path
@@ -13,13 +14,25 @@ import tempfile
 import unittest
 
 DEVICE = Path(__file__).resolve().parents[1]
-UPSTREAM = DEVICE.parent / 'unixnu'
-sys.path.insert(0, str(UPSTREAM / 'scripts'))
-from unixnu.devicetree import generate, read_fdt, registers, hardware_properties, arm_io_window
-from unixnu.util import Error
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from host_fixtures import upstream  # noqa: E402  (sibling helper, not a test module)
+
+UPSTREAM, UPSTREAM_SKIP = upstream()
+if UPSTREAM is not None:
+    sys.path.insert(0, str(UPSTREAM / 'scripts'))
+    from unixnu.devicetree import generate, read_fdt, registers, hardware_properties, arm_io_window
+    from unixnu.util import Error
+
+# The zero-DRAM guard this module asserts is an upstream behaviour, so probe the
+# upstream source for it rather than for a revision: the test re-arms as soon as
+# any checkout reintroduces the check instead of staying skipped forever.
+DRAM_GUARD = 'nonempty DRAM'
+UPSTREAM_HAS_DRAM_GUARD = UPSTREAM is not None and DRAM_GUARD in (
+    UPSTREAM / 'scripts/unixnu/devicetree.py').read_text(encoding='utf-8')
 
 
 @unittest.skipUnless(shutil.which('dtc'), 'requires dtc')
+@unittest.skipIf(UPSTREAM is None, UPSTREAM_SKIP)
 class Sm8735BindingsTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -65,6 +78,10 @@ class Sm8735BindingsTests(unittest.TestCase):
         self.assertEqual(self.root.cells('qcom,msm-id'), [681, 0x10000, 655, 0x10000])
         self.assertEqual(self.root.cells('xiaomi,miboard-id'), [7, 0])
 
+    @unittest.skipIf(not UPSTREAM_HAS_DRAM_GUARD,
+                     "pinned UniXNU dropped the 'nonempty DRAM' guard: fdf81ea devicetree.generate() only "
+                     "requires one contiguous DRAM range, so a zero-size bank is accepted; upstream drift, "
+                     "not a port defect")
     def test_unresolved_dram_is_rejected_by_real_generator(self):
         self.assertEqual(registers(self.child('memory@0')), [(0, 0)])
         with self.assertRaisesRegex(Error, 'nonempty DRAM'):

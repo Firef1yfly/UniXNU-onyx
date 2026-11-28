@@ -10,8 +10,13 @@ import tomllib
 import unittest
 
 DEVICE = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(DEVICE.parent / 'unixnu/scripts'))
-from unixnu.bootimg import compile_shim
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from host_fixtures import upstream  # noqa: E402  (sibling helper, not a test module)
+
+UPSTREAM, UPSTREAM_SKIP = upstream()
+if UPSTREAM is not None:
+    sys.path.insert(0, str(UPSTREAM / 'scripts'))
+    from unixnu.bootimg import compile_shim
 
 # Only the reviewed source context needed for applying the patch. This fixture
 # reproduces the local Mu-Silicium source bug; it is not a replacement firmware.
@@ -74,6 +79,7 @@ class BootImagePolicyTests(unittest.TestCase):
 
 @unittest.skipUnless(all(shutil.which(t) for t in ('git', 'clang', 'llvm-objcopy', 'llvm-nm', 'llvm-objdump')),
                      'requires git/LLVM cross-assembly tools')
+@unittest.skipIf(UPSTREAM is None, UPSTREAM_SKIP)
 class BootShimPatchTests(unittest.TestCase):
     def test_patch_compiles_header_and_preserves_x0_in_disassembly(self):
         with tempfile.TemporaryDirectory() as temp:

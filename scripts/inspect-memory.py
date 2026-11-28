@@ -11,6 +11,7 @@ import argparse
 import hashlib
 import importlib
 import json
+import os
 import re
 import struct
 import sys
@@ -277,11 +278,26 @@ def inspect(path, unixnu):
     return report
 
 
+def default_unixnu():
+    """The upstream checkout: UNIXNU_HOME, else the sibling record in board.toml.
+
+    ``[package] unixnu = "../UniXNU"`` is the layout every packaging run uses; the
+    lowercase sibling name is the tree this tool was first written against.
+    """
+    override = os.environ.get("UNIXNU_HOME", "").strip()
+    if override:
+        return Path(override).expanduser()
+    device = Path(__file__).resolve().parents[1]
+    for candidate in (device.parent / "UniXNU", device.parent / "unixnu"):
+        if (candidate / "scripts/unixnu/devicetree.py").is_file():
+            return candidate
+    return device.parent / "UniXNU"
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dtb", required=True, type=Path)
-    parser.add_argument("--unixnu", type=Path,
-                        default=Path(__file__).resolve().parents[1].parent / "unixnu")
+    parser.add_argument("--unixnu", type=Path, default=default_unixnu())
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
     report = inspect(args.dtb, args.unixnu)

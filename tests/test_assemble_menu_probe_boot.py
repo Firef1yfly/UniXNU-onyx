@@ -1,24 +1,55 @@
+"""Offline checks for the single-variable menu-probe assembler.
+
+Three groups of tests live here and they need different inputs:
+
+* the pinned input tests re-derive the recorded bytes, so they need the real
+  stock boot image, the real menu FAT and the real assembled candidate;
+* the validation-order tests need a real pinned source but only a bogus ramdisk;
+* the preflight and atomicity tests assert path/output policy and use tiny
+  synthetic fixtures, so they always run.
+
+The real artifacts are named by UNIXNU_HOME's siblings or by ONYX_BOOT_IMAGE,
+ONYX_MENU_FAT and ONYX_MENU_PROBE_CANDIDATE; a host without them skips with a
+reason instead of failing.
+"""
 import hashlib
 import importlib.util
 import os
+import shutil
 import struct
+import sys
 import tempfile
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
+HERE = Path(__file__).resolve().parent
+DEVICE = HERE.parent
+sys.path.insert(0, str(HERE))
+from host_fixtures import locate_file  # noqa: E402  (sibling helper, not a test module)
 
-ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = ROOT / "UniXNU-onyx/scripts/assemble-menu-probe-boot.py"
+SCRIPT = DEVICE / "scripts/assemble-menu-probe-boot.py"
 SPEC = importlib.util.spec_from_file_location("assemble_menu_probe_boot", SCRIPT)
 probe = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(probe)
 
-SOURCE = Path("/home/firefly/UniXNU/out/onyx/ios-17.7.11-21H461/example/boot/boot.img")
-RAMDISK = ROOT / "UniXNU-onyx/out/onyx-bringup/menu-fat/menu-only-fat32-64m.img"
-CANDIDATE = ROOT / "UniXNU-onyx/out/onyx-bringup/config-discovery/menu-probe-boot.img"
-MKBOOTIMG = Path("/home/firefly/UniXNU/Mu-Silicium/Resources/Scripts/mkbootimg.py")
+# Pinned historical source: the UniXNU output path the record names, else the
+# stock boot image this machine keeps at the top of the home directory.
+SOURCE, SOURCE_SKIP = locate_file(
+    "ONYX_BOOT_IMAGE",
+    (Path("/home/firefly/UniXNU/out/onyx/ios-17.7.11-21H461/example/boot/boot.img"),
+     Path("/home/firefly/onyx_boot.img")),
+    "pinned historical stock boot image")
+RAMDISK, RAMDISK_SKIP = locate_file(
+    "ONYX_MENU_FAT",
+    (DEVICE / "out/onyx-bringup/menu-fat/menu-only-fat32-64m.img",
+     Path("/home/firefly/UniXNU/out/onyx-bringup/menu-fat/menu-only-fat32-64m.img")),
+    "pinned menu FAT payload")
+CANDIDATE, CANDIDATE_SKIP = locate_file(
+    "ONYX_MENU_PROBE_CANDIDATE",
+    (DEVICE / "out/onyx-bringup/config-discovery/menu-probe-boot.img",),
+    "pinned menu-probe candidate image")
 
 
 def tiny_v4(path: Path, *, kernel: bytes, ramdisk: bytes) -> dict:
@@ -35,7 +66,12 @@ def tiny_v4(path: Path, *, kernel: bytes, ramdisk: bytes) -> dict:
 
 @contextmanager
 def synthetic_inputs(directory: Path):
-    """Yield tiny pinned-like inputs for atomicity tests only."""
+    """Yield tiny pinned-like inputs for the path-policy and atomicity tests.
+
+    Nothing here is a device artifact: the three paths only have to exist, so the
+    preflight, readback and cleanup rules can be asserted without the real
+    multi-hundred-megabyte inputs.
+    """
     directory = Path(directory)
     source = directory / "source.img"
     ramdisk = directory / "ramdisk.img"
@@ -54,9 +90,17 @@ def synthetic_inputs(directory: Path):
 
 
 class MenuProbeBootTests(unittest.TestCase):
+    def needs(self, path, reason):
+        """Skip when a pinned host artifact is absent; the assertion cannot stand in for it."""
+        if path is None:
+            self.skipTest(reason)
+        return path
+
     def test_pinned_inputs(self):
-        source = probe.assert_historical_source(SOURCE)
-        fat = probe.assert_menu_fat(RAMDISK)
+        if shutil.which("mdir") is None:
+            self.skipTest("requires mtools mdir to read the menu FAT")
+        source = probe.assert_historical_source(self.needs(SOURCE, SOURCE_SKIP))
+        fat = probe.assert_menu_fat(self.needs(RAMDISK, RAMDISK_SKIP))
         self.assertEqual(source["image_bytes"], 205361152)
         self.assertEqual(source["kernel_bytes"], 4025169)
         self.assertEqual(source["ramdisk_bytes"], 201326592)
@@ -65,39 +109,47 @@ class MenuProbeBootTests(unittest.TestCase):
         self.assertEqual(fat["entries"], ["::/EFI/", "::/EFI/UniXNU/", "::/EFI/UniXNU/unixnu.toml"])
 
     def test_existing_candidate_hash_and_final_path_readback(self):
-        self.assertTrue(CANDIDATE.is_file())
-        self.assertEqual(probe.sha256_file(CANDIDATE),
+        candidate = self.needs(CANDIDATE, CANDIDATE_SKIP)
+        self.assertTrue(candidate.is_file())
+        self.assertEqual(probe.sha256_file(candidate),
                          "4a33c186869e9c82529891c8ca85913ef75577b439b94e8d5af455b37613616f")
-        report = probe._scan_image(CANDIDATE)
+        report = probe._scan_image(candidate)
         self.assertEqual(report["image_bytes"], 71143424)
         self.assertEqual(report["kernel_sha256"],
                          "a9a3e200f0bfe9e2acb0f06cdb66dbc9e10ae2168cb65df4891fc5eee211477c")
         self.assertEqual(report["ramdisk_sha256"], probe.RAMDISK_SHA256)
         self.assertTrue(report["signature_zero"])
-        self.assertEqual(probe._hash_segment(CANDIDATE, probe.PAGE, probe.FD_OFFSET_IN_KERNEL),
+        self.assertEqual(probe._hash_segment(candidate, probe.PAGE, probe.FD_OFFSET_IN_KERNEL),
                          "7d40b171cb39a311d522bada00df2d857046fd1ef109462494d1f5c50a606594")
 
     def test_refuse_existing_output(self):
         with tempfile.TemporaryDirectory(prefix="onyx-menu-probe-test-") as directory:
-            output = Path(directory) / "candidate.img"
-            output.write_bytes(b"preserve me")
-            with self.assertRaisesRegex(ValueError, "refusing existing output"):
-                probe.assemble(SOURCE, RAMDISK, output, MKBOOTIMG)
-            self.assertEqual(output.read_bytes(), b"preserve me")
+            directory = Path(directory)
+            with synthetic_inputs(directory) as (source, ramdisk, mkbootimg):
+                output = directory / "candidate.img"
+                output.write_bytes(b"preserve me")
+                with self.assertRaisesRegex(ValueError, "refusing existing output"):
+                    probe.assemble(source, ramdisk, output, mkbootimg)
+                self.assertEqual(output.read_bytes(), b"preserve me")
 
     def test_reject_nonhistorical_source(self):
         with tempfile.TemporaryDirectory(prefix="onyx-menu-probe-test-") as directory:
-            source = Path(directory) / "not-historical.img"
-            source.write_bytes(b"not the pinned image")
-            with self.assertRaisesRegex(ValueError, "does not match pinned historical"):
-                probe.assemble(source, RAMDISK, Path(directory) / "candidate.img", MKBOOTIMG)
+            directory = Path(directory)
+            with synthetic_inputs(directory) as (_, ramdisk, mkbootimg):
+                source = directory / "not-historical.img"
+                source.write_bytes(b"not the pinned image")
+                with self.assertRaisesRegex(ValueError, "does not match pinned historical"):
+                    probe.assemble(source, ramdisk, directory / "candidate.img", mkbootimg)
 
     def test_reject_nonmenu_ramdisk(self):
+        source = self.needs(SOURCE, SOURCE_SKIP)
         with tempfile.TemporaryDirectory(prefix="onyx-menu-probe-test-") as directory:
-            ramdisk = Path(directory) / "ramdisk.img"
-            ramdisk.write_bytes(b"not the pinned menu FAT")
-            with self.assertRaisesRegex(ValueError, "does not match pinned"):
-                probe.assemble(SOURCE, ramdisk, Path(directory) / "candidate.img", MKBOOTIMG)
+            directory = Path(directory)
+            with synthetic_inputs(directory) as (_, _stub_source, mkbootimg):
+                ramdisk = directory / "ramdisk.img"
+                ramdisk.write_bytes(b"not the pinned menu FAT")
+                with self.assertRaisesRegex(ValueError, "does not match pinned"):
+                    probe.assemble(source, ramdisk, directory / "candidate.img", mkbootimg)
 
     def _atomic_assemble(self, directory: Path, *, report_failure=False, validation_failure=False):
         with synthetic_inputs(directory) as (source, ramdisk, mkbootimg):
@@ -132,20 +184,23 @@ class MenuProbeBootTests(unittest.TestCase):
     def test_report_collision_does_not_leave_output(self):
         with tempfile.TemporaryDirectory(prefix="onyx-menu-probe-test-") as directory:
             directory = Path(directory)
-            output = directory / "candidate.img"
-            report = directory / "report.json"
-            report.write_text("preserve me", encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "refusing existing report"):
-                probe.assemble(SOURCE, RAMDISK, output, MKBOOTIMG, report)
-            self.assertFalse(output.exists())
-            self.assertEqual(report.read_text(encoding="utf-8"), "preserve me")
+            with synthetic_inputs(directory) as (source, ramdisk, mkbootimg):
+                output = directory / "candidate.img"
+                report = directory / "report.json"
+                report.write_text("preserve me", encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "refusing existing report"):
+                    probe.assemble(source, ramdisk, output, mkbootimg, report)
+                self.assertFalse(output.exists())
+                self.assertEqual(report.read_text(encoding="utf-8"), "preserve me")
 
     def test_output_and_report_same_path_rejected(self):
         with tempfile.TemporaryDirectory(prefix="onyx-menu-probe-test-") as directory:
-            path = Path(directory) / "same"
-            with self.assertRaisesRegex(ValueError, "different paths"):
-                probe.assemble(SOURCE, RAMDISK, path, MKBOOTIMG, path)
-            self.assertFalse(path.exists())
+            directory = Path(directory)
+            with synthetic_inputs(directory) as (source, ramdisk, mkbootimg):
+                path = directory / "same"
+                with self.assertRaisesRegex(ValueError, "different paths"):
+                    probe.assemble(source, ramdisk, path, mkbootimg, path)
+                self.assertFalse(path.exists())
 
     def test_synthetic_report_failure_removes_only_our_output(self):
         with tempfile.TemporaryDirectory(prefix="onyx-menu-probe-test-") as directory:
@@ -218,7 +273,7 @@ class MenuProbeBootTests(unittest.TestCase):
             self.assertEqual(path.read_bytes(), b"replacement")
 
     def test_streaming_source_does_not_return_large_fields(self):
-        report = probe.assert_historical_source(SOURCE, load_data=False)
+        report = probe.assert_historical_source(self.needs(SOURCE, SOURCE_SKIP), load_data=False)
         self.assertNotIn("kernel", report)
         self.assertNotIn("ramdisk", report)
         self.assertEqual(report["kernel_sha256"], "a9a3e200f0bfe9e2acb0f06cdb66dbc9e10ae2168cb65df4891fc5eee211477c")

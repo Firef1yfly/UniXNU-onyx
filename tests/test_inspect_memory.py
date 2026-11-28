@@ -6,21 +6,31 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import shutil
 import struct
 import subprocess
+import sys
 import tempfile
+import tomllib
 import unittest
+from unittest import mock
 
 DEVICE = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from host_fixtures import upstream  # noqa: E402  (sibling helper, not a test module)
+
 SPEC = importlib.util.spec_from_file_location("inspect_memory", DEVICE / "scripts/inspect-memory.py")
 TOOL = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(TOOL)
-UNIXNU = DEVICE.parent / "unixnu"
+# The FDT parser lives in the upstream checkout, which this repository does not
+# carry; UNIXNU_HOME names it, and a bare clone skips instead of failing.
+UNIXNU, UNIXNU_SKIP = upstream()
 
 
 @unittest.skipUnless(shutil.which("dtc"), "requires dtc")
+@unittest.skipIf(UNIXNU is None, UNIXNU_SKIP)
 class InspectMemoryTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -208,6 +218,27 @@ class InspectMemoryTests(unittest.TestCase):
         self.assertFalse(report["memory_complete"])
         self.assertEqual(report["memory"]["enabled_ranges"][0]["size"], 0)
         self.assertFalse(report["identity"]["onyx_confirmed"])
+
+
+class UnixnuDefaultTests(unittest.TestCase):
+    """The CLI default, so a plain run finds the checkout without --unixnu."""
+
+    def test_unixnu_home_names_the_checkout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = Path(directory)
+            (checkout / "scripts/unixnu").mkdir(parents=True)
+            (checkout / "scripts/unixnu/devicetree.py").write_text("", encoding="utf-8")
+            with mock.patch.dict(os.environ, {"UNIXNU_HOME": str(checkout)}):
+                self.assertEqual(TOOL.default_unixnu(), checkout)
+
+    def test_fallback_is_the_sibling_recorded_in_board_toml(self):
+        board = tomllib.loads((DEVICE / "board.toml").read_text(encoding="utf-8"))
+        with mock.patch.dict(os.environ):
+            os.environ.pop("UNIXNU_HOME", None)
+            # With no checkout beside this clone a plain run still points at the
+            # documented sibling, so its error names the path a user must create.
+            self.assertEqual(TOOL.default_unixnu().resolve(),
+                             (DEVICE / board["package"]["unixnu"]).resolve())
 
 
 if __name__ == "__main__":
