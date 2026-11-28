@@ -1,17 +1,17 @@
 diff --git a/Platforms/Xiaomi/onyxPkg/Drivers/OnyxBringupReportDxe/OnyxBringupReportDxe.c b/Platforms/Xiaomi/onyxPkg/Drivers/OnyxBringupReportDxe/OnyxBringupReportDxe.c
 new file mode 100644
-index 0000000..ad10ee4
+index 0000000..98d944a
 --- /dev/null
 +++ b/Platforms/Xiaomi/onyxPkg/Drivers/OnyxBringupReportDxe/OnyxBringupReportDxe.c
-@@ -0,0 +1,205 @@
+@@ -0,0 +1,156 @@
 +/** @file
-+  Bring-up report: why does BDS find nothing to boot?
++  Bring-up report: print the boot-option state that decides what BDS boots.
 +
-+  The console is usable in DXE (BDS itself prints to it), but a driver that runs
-+  before GraphicsConsole binds sees the null console and prints into nothing.
-+  This driver therefore connects controllers until ConOut reports a real mode,
-+  prints the boot-option state that decides whether BDS boots UniXNU, and halts
-+  so the text stays on screen.
++  ConOut on this board renders nothing (the graphical console path does not reach
++  the panel), while DEBUG output does appear because the platform SerialPortLib
++  draws it into the framebuffer. The report therefore uses DEBUG at ERROR level,
++  which the platform debug level cannot filter out, and then halts so the text
++  stays readable.
 +
 +  Diagnostic build only.
 +
@@ -24,56 +24,18 @@ index 0000000..ad10ee4
 +#include <Guid/GlobalVariable.h>
 +#include <Library/BaseLib.h>
 +#include <Library/DebugLib.h>
++#include <Library/DevicePathLib.h>
 +#include <Library/HobLib.h>
-+#include <Library/PrintLib.h>
 +#include <Library/MemoryAllocationLib.h>
++#include <Library/PcdLib.h>
++#include <Library/PrintLib.h>
 +#include <Library/UefiBootServicesTableLib.h>
-+#include <Library/UefiLib.h>
 +#include <Library/UefiRuntimeServicesTableLib.h>
 +#include <Protocol/FirmwareVolume2.h>
-+#include <Protocol/GraphicsOutput.h>
-+#include <Protocol/DevicePath.h>
-+#include <Library/DevicePathLib.h>
-+#include <Library/PcdLib.h>
 +
 +STATIC CONST EFI_GUID  mEntryArgHobGuid = {
 +  0xDAEE82E6, 0x8090, 0x4E72, { 0xBF, 0xB9, 0x78, 0xC1, 0x3C, 0xD4, 0xE3, 0x59 }
 +};
-+
-+//
-+// Connect every controller once per round until the console has a real mode.
-+//
-+STATIC
-+BOOLEAN
-+WaitForConsole (
-+  VOID
-+  )
-+{
-+  EFI_STATUS  Status;
-+  EFI_HANDLE  *Handles;
-+  UINTN       Count;
-+  UINTN       Index;
-+  UINTN       Round;
-+
-+  for (Round = 0; Round < 50; Round++) {
-+    if ((gST->ConOut != NULL) && (gST->ConOut->Mode != NULL) && (gST->ConOut->Mode->Mode >= 0)) {
-+      return TRUE;
-+    }
-+
-+    Status = gBS->LocateHandleBuffer (ByProtocol, NULL, NULL, &Count, &Handles);
-+    if (!EFI_ERROR (Status)) {
-+      for (Index = 0; Index < Count; Index++) {
-+        gBS->ConnectController (Handles[Index], NULL, NULL, TRUE);
-+      }
-+
-+      FreePool (Handles);
-+    }
-+
-+    gBS->Stall (100000);
-+  }
-+
-+  return (gST->ConOut != NULL) && (gST->ConOut->Mode != NULL) && (gST->ConOut->Mode->Mode >= 0);
-+}
 +
 +STATIC
 +VOID
@@ -100,29 +62,31 @@ index 0000000..ad10ee4
 +  }
 +
 +  if (EFI_ERROR (Status) || (Order == NULL)) {
-+    Print (L"  BootOrder: unavailable (%r)\r\n", Status);
-+  } else {
-+    Print (L"  BootOrder: %u entries\r\n", (UINT32)(OrderSize / sizeof (UINT16)));
-+    for (Index = 0; Index < OrderSize / sizeof (UINT16); Index++) {
-+      UnicodeSPrint (Name, sizeof (Name), L"Boot%04x", Order[Index]);
-+      Value     = NULL;
-+      ValueSize = 0;
-+      Status    = gRT->GetVariable (Name, &gEfiGlobalVariableGuid, NULL, &ValueSize, NULL);
-+      if (Status == EFI_BUFFER_TOO_SMALL) {
-+        Value = AllocatePool (ValueSize);
-+        if (Value != NULL) {
-+          Status = gRT->GetVariable (Name, &gEfiGlobalVariableGuid, NULL, &ValueSize, Value);
-+        }
-+      }
++    DEBUG ((DEBUG_ERROR, "ONYX: BootOrder is unavailable (%r)\n", Status));
++    return;
++  }
 +
-+      Print (L"    %s: %u bytes, %r\r\n", Name, (UINT32)ValueSize, Status);
++  DEBUG ((DEBUG_ERROR, "ONYX: BootOrder has %u entries\n", (UINT32)(OrderSize / sizeof (UINT16))));
++  for (Index = 0; Index < OrderSize / sizeof (UINT16); Index++) {
++    UnicodeSPrint (Name, sizeof (Name), L"Boot%04x", Order[Index]);
++    Value     = NULL;
++    ValueSize = 0;
++    Status    = gRT->GetVariable (Name, &gEfiGlobalVariableGuid, NULL, &ValueSize, NULL);
++    if (Status == EFI_BUFFER_TOO_SMALL) {
++      Value = AllocatePool (ValueSize);
 +      if (Value != NULL) {
-+        FreePool (Value);
++        Status = gRT->GetVariable (Name, &gEfiGlobalVariableGuid, NULL, &ValueSize, Value);
 +      }
 +    }
 +
-+    FreePool (Order);
++    DEBUG ((DEBUG_ERROR, "ONYX:   entry %u: %u bytes, %r\n",
++            (UINT32)Index, (UINT32)ValueSize, Status));
++    if (Value != NULL) {
++      FreePool (Value);
++    }
 +  }
++
++  FreePool (Order);
 +}
 +
 +STATIC
@@ -138,19 +102,21 @@ index 0000000..ad10ee4
 +  VOID        *Hob;
 +
 +  Hob = GetFirstGuidHob (&mEntryArgHobGuid);
-+  Print (L"  handoff HOB: %s\r\n", (Hob == NULL) ? L"absent" : L"present");
++  DEBUG ((DEBUG_ERROR, "ONYX: handoff HOB: %a\n", (Hob == NULL) ? "absent" : "present"));
 +
 +  //
-+  // Mirror what UniXNUDxe does: it can only register a boot option when a
-+  // firmware volume both carries a device path and holds the application.
++  // Mirror UniXNUDxe: it can only register a boot option when a firmware volume
++  // carries a device path and holds the application file.
 +  //
 +  Status = gBS->LocateHandleBuffer (ByProtocol, &gEfiFirmwareVolume2ProtocolGuid, NULL, &Count, &Handles);
 +  if (EFI_ERROR (Status)) {
-+    Print (L"  firmware volumes: %r\r\n", Status);
-+  } else {
-+    UINTN       WithPath = 0;
-+    UINTN       WithApp  = 0;
-+    EFI_HANDLE  AppHandle = NULL;
++    DEBUG ((DEBUG_ERROR, "ONYX: firmware volumes: %r\n", Status));
++    return;
++  }
++
++  {
++    UINTN  WithPath = 0;
++    UINTN  WithApp  = 0;
 +
 +    for (Index = 0; Index < Count; Index++) {
 +      EFI_FIRMWARE_VOLUME2_PROTOCOL  *Fv;
@@ -168,22 +134,15 @@ index 0000000..ad10ee4
 +                                    NULL, &Size, &Type, &Attributes, &AuthStatus)))
 +      {
 +        WithApp++;
-+        if (AppHandle == NULL) {
-+          AppHandle = Handles[Index];
-+        }
 +      }
 +    }
 +
-+    Print (L"  firmware volumes: %u (%u with device path)\r\n", (UINT32)Count, (UINT32)WithPath);
-+    Print (L"  volumes holding UniXNU.efi: %u\r\n", (UINT32)WithApp);
-+    if (AppHandle != NULL) {
-+      Print (L"  that volume has a device path: %s\r\n",
-+             (DevicePathFromHandle (AppHandle) != NULL) ? L"yes" : L"no");
-+    }
-+
-+    FreePool (Handles);
++    DEBUG ((DEBUG_ERROR, "ONYX: firmware volumes: %u, %u with a device path\n",
++            (UINT32)Count, (UINT32)WithPath));
++    DEBUG ((DEBUG_ERROR, "ONYX: volumes holding UniXNU.efi: %u\n", (UINT32)WithApp));
 +  }
 +
++  FreePool (Handles);
 +  ReportBootOptions ();
 +}
 +
@@ -194,27 +153,19 @@ index 0000000..ad10ee4
 +  IN EFI_SYSTEM_TABLE  *SystemTable
 +  )
 +{
-+  if (WaitForConsole ()) {
-+    gST->ConOut->ClearScreen (gST->ConOut);
-+  }
-+
-+  Print (L"\r\n=== onyx bring-up report ===\r\n");
-+  Print (L"console mode %d, %ux%u\r\n",
-+         (INT32)gST->ConOut->Mode->Mode,
-+         (UINT32)gST->ConOut->Mode->CursorColumn,
-+         (UINT32)gST->ConOut->Mode->CursorRow);
++  DEBUG ((DEBUG_ERROR, "\nONYX: === bring-up report ===\n"));
 +  ReportEnvironment ();
-+  Print (L"=== halting; power cycle to continue ===\r\n");
++  DEBUG ((DEBUG_ERROR, "ONYX: === halting; power cycle to continue ===\n"));
 +
 +  CpuDeadLoop ();
 +  return EFI_SUCCESS;
 +}
 diff --git a/Platforms/Xiaomi/onyxPkg/Drivers/OnyxBringupReportDxe/OnyxBringupReportDxe.inf b/Platforms/Xiaomi/onyxPkg/Drivers/OnyxBringupReportDxe/OnyxBringupReportDxe.inf
 new file mode 100644
-index 0000000..f08400d
+index 0000000..58bcc93
 --- /dev/null
 +++ b/Platforms/Xiaomi/onyxPkg/Drivers/OnyxBringupReportDxe/OnyxBringupReportDxe.inf
-@@ -0,0 +1,46 @@
+@@ -0,0 +1,48 @@
 +## @file
 +#  Bring-up report driver: prints the boot-option state BDS will act on.
 +#
@@ -247,6 +198,8 @@ index 0000000..f08400d
 +  MemoryAllocationLib
 +  HobLib
 +  PrintLib
++  DevicePathLib
++  PcdLib
 +  DevicePathLib
 +  PcdLib
 +
