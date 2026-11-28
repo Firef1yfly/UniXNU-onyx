@@ -343,6 +343,10 @@ Checked against the device repository specification
 | `.gitignore`, `local.toml.example` | done; local paths and generated output ignored |
 | `unixnu` GitHub topic | added and verified |
 | `.github/workflows/porting-record.yml`, `package.yml` | pushed; the `Porting record` check passes on `main` |
+
+A pushed commit whose `porting.toml` does not parse makes the *next* run fail as
+well, because the check parses the record at its base commit. Re-word the record
+without stray quotes and push once more rather than rewriting history.
 | `board.example` | stays `true`; the hardware inputs are incomplete and the specification forbids claiming otherwise |
 
 `check-inputs.py` still fails closed, as it must while the DRAM evidence and
