@@ -1,5 +1,7 @@
 # UniXNU — Redmi Turbo 4 Pro (onyx)
 
+English | [简体中文](README.zh-CN.md)
+
 **Experimental reconstruction. No successful UEFI boot is claimed yet** — the boot
 loader accepts the image but the firmware has not been observed running. Nothing
 has been flashed; every device test used `fastboot boot` only.
