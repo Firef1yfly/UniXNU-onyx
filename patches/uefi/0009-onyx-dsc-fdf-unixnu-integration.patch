@@ -1,20 +1,21 @@
 diff --git a/Platforms/Xiaomi/onyxPkg/onyx.dsc b/Platforms/Xiaomi/onyxPkg/onyx.dsc
-index 84c2790..5abef59 100644
+index 84c2790..8c2897d 100644
 --- a/Platforms/Xiaomi/onyxPkg/onyx.dsc
 +++ b/Platforms/Xiaomi/onyxPkg/onyx.dsc
-@@ -28,6 +28,11 @@
+@@ -28,6 +28,12 @@
  !include BonitoPkg/BonitoPkg.dsc.inc
  
  [PcdsFixedAtBuild]
 +  #
-+  # Bring-up: keep only error-level output so an exception dump stays on screen.
-+  # The default level floods the console and pushes the exception header away.
++  # Bring-up: keep the default level. Restricting it to errors made the
++  # framebuffer draw nothing at all, so the bring-up report is delivered as the
++  # tail of the log instead: its driver halts, which freezes the last lines.
 +  #
-+  gEfiMdePkgTokenSpaceGuid.PcdDebugPrintErrorLevel|0x80000000
++  gEfiMdePkgTokenSpaceGuid.PcdDebugPrintErrorLevel|0x8007EE0F
    #
    # DDR Memory
    #
-@@ -44,6 +49,8 @@
+@@ -44,6 +50,8 @@
    #
    gUniXNUPkgTokenSpaceGuid.PcdUniXNUDebugLevel|0x00000040
    gUniXNUPkgTokenSpaceGuid.PcdUniXNUConfigPath|L"\\EFI\\UniXNU\\unixnu.toml"
@@ -23,7 +24,7 @@ index 84c2790..5abef59 100644
  
    #
    # SMBIOS
-@@ -57,6 +64,11 @@
+@@ -57,6 +65,11 @@
    #
    # Simple Frame Buffer
    #
@@ -35,7 +36,7 @@ index 84c2790..5abef59 100644
    gSiliciumPkgTokenSpaceGuid.PcdFrameBufferWidth|1280
    gSiliciumPkgTokenSpaceGuid.PcdFrameBufferHeight|2772
    gSiliciumPkgTokenSpaceGuid.PcdFrameBufferColorDepth|32
-@@ -81,6 +93,17 @@
+@@ -81,6 +94,17 @@
    # UniXNU boot manager
    #
    UniXNULib|UniXNUPkg/Library/UniXNULib/UniXNULib.inf
@@ -53,7 +54,7 @@ index 84c2790..5abef59 100644
  
  [Components]
    #
-@@ -91,6 +114,8 @@
+@@ -91,6 +115,8 @@
    #
    # UniXNU boot manager stack
    #
@@ -62,7 +63,7 @@ index 84c2790..5abef59 100644
    UniXNUPkg/Driver/UniXNURamDiskDxe/UniXNURamDiskDxe.inf
    UniXNUPkg/Driver/UniXNUDxe/UniXNUDxe.inf
    UniXNUPkg/Application/UniXNU/UniXNU.inf
-@@ -101,4 +126,19 @@
+@@ -101,4 +127,19 @@
    FatPkg/EnhancedFatDxe/Fat.inf
  
  [BuildOptions]

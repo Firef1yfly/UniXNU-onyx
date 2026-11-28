@@ -348,6 +348,24 @@ Checked against the device repository specification
 `check-inputs.py` still fails closed, as it must while the DRAM evidence and
 `inputs.toml` provenance are missing.
 
+## Output paths, and why the report is still not visible
+
+Two output paths behave differently on this board:
+
+| Path | Result |
+| --- | --- |
+| `Print` -> ConOut -> GraphicsConsole -> GOP | nothing renders |
+| `DEBUG` -> platform SerialPortLib -> framebuffer | renders (hundreds of lines were readable) |
+
+Restricting `PcdDebugPrintErrorLevel` to errors made the framebuffer draw nothing
+at all, so the level is back at its default. The bring-up report uses `DEBUG` at
+error level and then halts, on the theory that a halt makes the report the tail of
+the log; the device still ends on a grey frame after about three pages of output,
+which means the driver did not reach its halt. Its `Depex` is `TRUE` and the file
+is present in the inner volume, so the next thing to check is dispatch order:
+a driver placed early runs before the graphics and firmware-volume plumbing it
+reads, and a `Print`-based report loses to the same ConOut problem.
+
 ## Hardware status and safety
 
 No successful UEFI/menu boot is claimed. A prior `fastboot boot` attempt was black-screen/unobserved and was recovered by rebooting Android; it did not demonstrate UEFI success. No `fastboot flash` or partition write is part of this work. Any future device attempts remain `fastboot boot` only, after log capture and recovery readiness.
