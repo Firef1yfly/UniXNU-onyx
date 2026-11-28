@@ -162,10 +162,10 @@ index 0000000..98d944a
 +}
 diff --git a/Platforms/Xiaomi/onyxPkg/Drivers/OnyxBringupReportDxe/OnyxBringupReportDxe.inf b/Platforms/Xiaomi/onyxPkg/Drivers/OnyxBringupReportDxe/OnyxBringupReportDxe.inf
 new file mode 100644
-index 0000000..58bcc93
+index 0000000..961401d
 --- /dev/null
 +++ b/Platforms/Xiaomi/onyxPkg/Drivers/OnyxBringupReportDxe/OnyxBringupReportDxe.inf
-@@ -0,0 +1,48 @@
+@@ -0,0 +1,49 @@
 +## @file
 +#  Bring-up report driver: prints the boot-option state BDS will act on.
 +#
@@ -211,6 +211,7 @@ index 0000000..58bcc93
 +
 +[Protocols]
 +  gEfiFirmwareVolume2ProtocolGuid
++  gEfiGraphicsOutputProtocolGuid
 +
 +[Depex]
-+  TRUE
++  gEfiGraphicsOutputProtocolGuid

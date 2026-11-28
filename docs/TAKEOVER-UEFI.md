@@ -361,10 +361,11 @@ Restricting `PcdDebugPrintErrorLevel` to errors made the framebuffer draw nothin
 at all, so the level is back at its default. The bring-up report uses `DEBUG` at
 error level and then halts, on the theory that a halt makes the report the tail of
 the log; the device still ends on a grey frame after about three pages of output,
-which means the driver did not reach its halt. Its `Depex` is `TRUE` and the file
-is present in the inner volume, so the next thing to check is dispatch order:
-a driver placed early runs before the graphics and firmware-volume plumbing it
-reads, and a `Print`-based report loses to the same ConOut problem.
+which means the driver did not reach its halt. Its file is present in the inner
+volume; the cause is dispatch order. With `Depex = TRUE` it dispatched at DXE core
+start, before the graphics and firmware-volume plumbing it reads, so its report was
+written into a framebuffer path that did not exist yet. The driver now depends on
+`gEfiGraphicsOutputProtocolGuid`.
 
 ## Hardware status and safety
 
