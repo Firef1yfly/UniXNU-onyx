@@ -1,0 +1,594 @@
+diff --git a/Tests/OnyxHandoff/onyx_host_mock.c b/Tests/OnyxHandoff/onyx_host_mock.c
+new file mode 100644
+index 0000000..be9141e
+--- /dev/null
++++ b/Tests/OnyxHandoff/onyx_host_mock.c
+@@ -0,0 +1,76 @@
++/* Host mocks for OnyxHandoff.c. Test-only. */
++#include "onyx_host_shim.h"
++#include <stdarg.h>
++#include <libfdt.h>
++
++EFI_MEMORY_REGION_DESCRIPTOR  gHostMap[32];
++UINT8                         gHostMapCount;
++
++VOID *
++OnyxHostMapBase (VOID)
++{
++  return (VOID *)gHostMap;
++}
++
++VOID
++OnyxHostDebug (
++  IN UINT32  Level,
++  IN CHAR8   *Format,
++  ...
++  )
++{
++  va_list  Args;
++
++  (VOID)Level;
++  va_start (Args, Format);
++  vprintf (Format, Args);
++  va_end (Args);
++  printf ("\n");
++}
++
++VOID
++GetMemoryMap (
++  OUT EFI_MEMORY_REGION_DESCRIPTOR  **MemoryDescriptor,
++  OUT UINT8                         *MemoryDescriptorCount
++  )
++{
++  *MemoryDescriptor      = gHostMap;
++  *MemoryDescriptorCount = gHostMapCount;
++}
++
++INT32
++FdtCheckHeader (
++  IN CONST VOID  *Fdt
++  )
++{
++  return fdt_check_header (Fdt);
++}
++
++INT32
++FdtPathOffset (
++  IN CONST VOID   *Fdt,
++  IN CONST CHAR8  *Path
++  )
++{
++  return fdt_path_offset (Fdt, Path);
++}
++
++CONST FDT_PROPERTY *
++FdtGetProperty (
++  IN CONST VOID   *Fdt,
++  IN INT32        NodeOffset,
++  IN CONST CHAR8  *Name,
++  IN INT32        *Length
++  )
++{
++  return (CONST FDT_PROPERTY *)fdt_get_property (Fdt, NodeOffset, Name, Length);
++}
++
++int
++AsciiStrCmp (
++  IN CONST CHAR8  *A,
++  IN CONST CHAR8  *B
++  )
++{
++  return strcmp (A, B);
++}
+diff --git a/Tests/OnyxHandoff/onyx_host_shim.h b/Tests/OnyxHandoff/onyx_host_shim.h
+new file mode 100644
+index 0000000..b2568fa
+--- /dev/null
++++ b/Tests/OnyxHandoff/onyx_host_shim.h
+@@ -0,0 +1,87 @@
++/* Host stand-ins for the EDK II surface OnyxHandoff.c uses.
++ * Test-only: it lets the real validation code run against real libfdt on a
++ * synthetic board map. It is not firmware code and never ships. */
++#ifndef ONYX_HOST_SHIM_H_
++#define ONYX_HOST_SHIM_H_
++
++#include <stdint.h>
++#include <stdio.h>
++#include <string.h>
++
++typedef void      VOID;
++typedef uint8_t   UINT8;
++typedef uint32_t  UINT32;
++typedef uint64_t  UINT64;
++typedef int32_t   INT32;
++typedef uint64_t  UINTN;
++typedef int64_t   INTN;
++typedef char      CHAR8;
++typedef unsigned char BOOLEAN;
++typedef uint64_t  EFI_STATUS;
++typedef uint64_t  EFI_PHYSICAL_ADDRESS;
++typedef uint32_t  EFI_RESOURCE_TYPE;
++typedef uint32_t  EFI_MEMORY_TYPE;
++
++#define CONST          const
++#define STATIC         static
++#define IN
++#define OUT
++#define EFIAPI
++#define TRUE           1
++#define FALSE          0
++#define ARRAY_SIZE(a)  (sizeof (a) / sizeof ((a)[0]))
++
++#define EFI_SUCCESS               0
++#define EFI_INVALID_PARAMETER     0x8000000000000002ULL
++#define EFI_NOT_FOUND             0x800000000000000EULL
++#define EFI_SECURITY_VIOLATION    0x800000000000001AULL
++#define EFI_ERROR(Status)         (((Status) & 0x8000000000000000ULL) != 0)
++
++#define DEBUG_ERROR  0x80000000U
++#define DEBUG_WARN   0x00000002U
++#define DEBUG(Expression)  OnyxHostDebug Expression
++
++#define EFI_RESOURCE_SYSTEM_MEMORY  0x00000007U
++#define EfiReservedMemoryType       0x00000000U
++#define SIZE_4KB                    0x1000ULL
++
++typedef struct {
++  CHAR8                  Name[32];
++  EFI_PHYSICAL_ADDRESS   Address;
++  UINT64                 Length;
++  UINT32                 HobOption;
++  EFI_RESOURCE_TYPE      ResourceType;
++  UINT32                 ResourceAttribute;
++  EFI_MEMORY_TYPE        MemoryType;
++  UINT32                 ArmAttributes;
++} EFI_MEMORY_REGION_DESCRIPTOR;
++
++typedef struct {
++  UINT32  Tag;
++  UINT32  Length;
++  UINT32  NameOffset;
++  CHAR8   Data[];
++} FDT_PROPERTY;
++
++extern EFI_MEMORY_REGION_DESCRIPTOR  gHostMap[];
++extern UINT8                         gHostMapCount;
++
++VOID
++OnyxHostDebug (
++  IN UINT32  Level,
++  IN CHAR8   *Format,
++  ...
++  );
++
++VOID
++GetMemoryMap (
++  OUT EFI_MEMORY_REGION_DESCRIPTOR  **MemoryDescriptor,
++  OUT UINT8                         *MemoryDescriptorCount
++  );
++
++INT32  FdtCheckHeader (IN CONST VOID *Fdt);
++INT32  FdtPathOffset (IN CONST VOID *Fdt, IN CONST CHAR8 *Path);
++CONST FDT_PROPERTY *FdtGetProperty (IN CONST VOID *Fdt, IN INT32 NodeOffset, IN CONST CHAR8 *Name, IN INT32 *Length);
++int AsciiStrCmp (IN CONST CHAR8 *A, IN CONST CHAR8 *B);
++
++#endif /* ONYX_HOST_SHIM_H_ */
+diff --git a/Tests/OnyxHandoff/test_onyx_board_map.py b/Tests/OnyxHandoff/test_onyx_board_map.py
+new file mode 100644
+index 0000000..1667261
+--- /dev/null
++++ b/Tests/OnyxHandoff/test_onyx_board_map.py
+@@ -0,0 +1,138 @@
++#!/usr/bin/env python3
++"""Cross-check OnyxHandoff.c against the real onyx memory map and device capture.
++
++The board map is parsed from the platform's own MemoryMapLib source, not copied
++here, so a firmware map edit that moves a region fails this test instead of
++silently invalidating the handoff assumptions. The initrd figures come from the
++2026-11-28 read-only device capture.
++"""
++import ctypes
++import re
++import subprocess
++import tempfile
++import unittest
++from pathlib import Path
++
++HERE = Path(__file__).resolve().parent
++MU = HERE.parents[1]
++MAP_SOURCE = MU / "Platforms/Xiaomi/onyxPkg/Library/MemoryMapLib/MemoryMapLib.c"
++SOURCE = MU / "Silicon/Silicium/SiliciumPkg/Sec/OnyxHandoff.c"
++LIBFDT = MU / "Mu_Basecore/MdePkg/Library/BaseFdtLib/libfdt/libfdt"
++
++EFI_SUCCESS = 0
++EFI_NOT_FOUND = 0x800000000000000E
++EFI_SECURITY_VIOLATION = 0x800000000000001A
++
++# 2026-11-28 capture: /chosen on the live tree.
++INITRD_START, INITRD_END = 0xB5921000, 0xB7FFEB18
++
++ROW = re.compile(
++    r'\{"(?P<name>[^"]+)",\s*0x(?P<addr>[0-9A-Fa-f]+),\s*0x(?P<len>[0-9A-Fa-f]+),\s*'
++    r'(?P<hob>\w+),\s*(?P<res>\w+),\s*(?P<attr>\w+),\s*(?P<type>\w+),')
++
++LIBFDT_SOURCES = ("fdt.c", "fdt_ro.c", "fdt_rw.c", "fdt_wip.c", "fdt_sw.c", "fdt_check.c",
++                  "fdt_strerror.c", "fdt_empty_tree.c", "fdt_addresses.c", "fdt_overlay.c")
++
++
++def board_regions():
++    """Return the descriptors the firmware actually publishes for onyx."""
++    regions = []
++    for line in MAP_SOURCE.read_text().splitlines():
++        if line.lstrip().startswith("//"):
++            continue
++        match = ROW.search(line)
++        if match:
++            regions.append({
++                "name": match["name"], "base": int(match["addr"], 16), "size": int(match["len"], 16),
++                "resource": match["res"], "memory_type": match["type"],
++            })
++    return regions
++
++
++class BoardMapTests(unittest.TestCase):
++    @classmethod
++    def setUpClass(cls):
++        cls.temp = tempfile.TemporaryDirectory()
++        cls.addClassCleanup(cls.temp.cleanup)
++        target = Path(cls.temp.name) / "libonyx.so"
++        sources = [str(HERE / "onyx_host_mock.c"), str(SOURCE)]
++        sources += [str(LIBFDT / n) for n in LIBFDT_SOURCES]
++        subprocess.run(["clang", "-shared", "-fPIC", "-O1", "-DONYX_HANDOFF_HOST", "-Werror",
++                        "-I", str(HERE), "-I", str(LIBFDT), "-include", str(HERE / "onyx_host_shim.h"),
++                        *sources, "-o", str(target)], check=True, capture_output=True, text=True)
++        cls.lib = ctypes.CDLL(str(target))
++        cls.lib.OnyxValidateHandoffRanges.restype = ctypes.c_uint64
++        cls.lib.OnyxValidateHandoffRanges.argtypes = [
++            ctypes.c_uint64, ctypes.c_uint64, ctypes.c_uint64, ctypes.c_uint64,
++            ctypes.c_void_p, ctypes.c_uint64, ctypes.c_void_p]
++
++    def call(self, fdt, size, start, end, regions):
++        array = (ctypes.c_uint64 * (2 * len(regions)))(*[v for r in regions for v in (r["base"], r["size"])])
++        result = (ctypes.c_uint64 * 5)()
++        status = self.lib.OnyxValidateHandoffRanges(
++            fdt, size, start, end, ctypes.cast(array, ctypes.c_void_p), len(regions),
++            ctypes.cast(result, ctypes.c_void_p))
++        return status, list(result)
++
++    def board_input(self, regions=None):
++        # The validator only ever receives regions the firmware keeps reserved.
++        return [r for r in (regions or board_regions()) if r["memory_type"] == "Reserv"]
++
++    def test_map_parses(self):
++        regions = board_regions()
++        names = {r["name"] for r in regions}
++        self.assertGreater(len(regions), 30)
++        for expected in ("UEFI_FD", "UEFI_Stack", "SEC_Heap", "Kernel", "DXE_Heap"):
++            self.assertIn(expected, names)
++        fd = next(r for r in regions if r["name"] == "UEFI_FD")
++        self.assertEqual((fd["base"], fd["size"]), (0xA7100000, 0x300000))
++
++    def test_captured_initrd_lands_in_reserved_board_input(self):
++        accepted = self.board_input()
++        self.assertIn("Kernel", {r["name"] for r in accepted})
++        # A FDT placed in XBL_DT satisfies the validator with the captured initrd.
++        xbl = next(r for r in accepted if r["name"] == "XBL_DT")
++        status, result = self.call(xbl["base"], 0x4000, INITRD_START, INITRD_END, accepted)
++        self.assertEqual(status, EFI_SUCCESS)
++        self.assertEqual(result[2], INITRD_START)
++        # 0xb7ffeb18 rounds up to the next 512-byte boundary, still inside the
++        # Kernel reservation that ends at 0xb8000000.
++        self.assertEqual(result[3], 0xB7FFEC00)
++        self.assertLess(result[3], 0xB8000000)
++        self.assertEqual(result[0], xbl["base"])
++
++    def test_firmware_owned_regions_are_not_board_input(self):
++        accepted = {r["name"] for r in self.board_input()}
++        for owned in ("UEFI_FD", "UEFI_Stack", "SEC_Heap", "Sched_Heap", "UEFI_RESV", "MMU_PageTables"):
++            self.assertNotIn(owned, accepted)
++
++    def test_fdt_in_firmware_footprint_is_rejected(self):
++        accepted = self.board_input()
++        for name in ("UEFI_FD", "UEFI_Stack", "SEC_Heap"):
++            with self.subTest(region=name):
++                region = next(r for r in board_regions() if r["name"] == name)
++                status, _ = self.call(region["base"], 0x1000, INITRD_START, INITRD_END, accepted)
++                self.assertEqual(status, EFI_SECURITY_VIOLATION)
++
++    def test_captured_initrd_without_kernel_region_is_rejected(self):
++        accepted = [r for r in self.board_input() if r["name"] != "Kernel"]
++        xbl = next(r for r in accepted if r["name"] == "XBL_DT")
++        status, _ = self.call(xbl["base"], 0x4000, INITRD_START, INITRD_END, accepted)
++        self.assertEqual(status, EFI_SECURITY_VIOLATION)
++
++    def test_payload_above_kernel_reservation_is_rejected(self):
++        accepted = self.board_input()
++        xbl = next(r for r in accepted if r["name"] == "XBL_DT")
++        # A payload that ran past 0xb8000000 would leave the reserved window.
++        status, _ = self.call(xbl["base"], 0x4000, INITRD_START, 0xB9000000, accepted)
++        self.assertEqual(status, EFI_SECURITY_VIOLATION)
++
++    def test_missing_initrd_is_reported_not_downgraded(self):
++        accepted = self.board_input()
++        xbl = next(r for r in accepted if r["name"] == "XBL_DT")
++        status, _ = self.call(xbl["base"], 0x4000, 0, 0, accepted)
++        self.assertEqual(status, EFI_NOT_FOUND)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/Tests/OnyxHandoff/test_onyx_handoff.py b/Tests/OnyxHandoff/test_onyx_handoff.py
+new file mode 100644
+index 0000000..4695ca5
+--- /dev/null
++++ b/Tests/OnyxHandoff/test_onyx_handoff.py
+@@ -0,0 +1,196 @@
++#!/usr/bin/env python3
++"""Host tests for SiliconPkg/Sec/OnyxHandoff.c.
++
++The real firmware source is compiled with host stand-ins plus the real libfdt
++from Mu_Basecore and driven through ctypes. Device trees come from dtc.
++Addresses and buffers are synthetic; none is a measured onyx address.
++"""
++import ctypes
++import struct
++import subprocess
++import tempfile
++import unittest
++from pathlib import Path
++
++HERE = Path(__file__).resolve().parent
++MU = HERE.parents[1]
++SOURCE = MU / "Silicon/Silicium/SiliciumPkg/Sec/OnyxHandoff.c"
++LIBFDT = MU / "Mu_Basecore/MdePkg/Library/BaseFdtLib/libfdt/libfdt"
++
++EFI_SUCCESS = 0
++EFI_INVALID_PARAMETER = 0x8000000000000002
++EFI_NOT_FOUND = 0x800000000000000E
++EFI_SECURITY_VIOLATION = 0x800000000000001A
++
++KERNEL_BASE, KERNEL_SIZE = 0x88000000, 0x10000000
++XBL_DT_BASE, XBL_DT_SIZE = 0x019A0000, 0x00040000
++REGION_STRUCT = 72  # Name[32], Address/Length at 32/40, then five UINT32 (68 -> 72 padded)
++
++LIBFDT_SOURCES = ("fdt.c", "fdt_ro.c", "fdt_rw.c", "fdt_wip.c", "fdt_sw.c", "fdt_check.c",
++                  "fdt_strerror.c", "fdt_empty_tree.c", "fdt_addresses.c", "fdt_overlay.c")
++
++
++def build_library(target: Path) -> Path:
++    sources = [str(HERE / "onyx_host_mock.c"), str(SOURCE)]
++    sources += [str(LIBFDT / name) for name in LIBFDT_SOURCES]
++    command = ["clang", "-shared", "-fPIC", "-O1", "-g", "-DONYX_HANDOFF_HOST", "-Werror",
++               "-I", str(HERE), "-I", str(LIBFDT), "-include", str(HERE / "onyx_host_shim.h"),
++               *sources, "-o", str(target)]
++    try:
++        subprocess.run(command, check=True, capture_output=True, text=True)
++    except FileNotFoundError as error:
++        raise unittest.SkipTest(f"clang unavailable: {error}") from error
++    except subprocess.CalledProcessError as error:
++        raise AssertionError(f"host build failed:\n{error.stdout}\n{error.stderr}") from error
++    return target
++
++
++def make_dtb(directory: Path, body: str) -> bytes:
++    source, output = directory / "tree.dts", directory / "tree.dtb"
++    source.write_text("/dts-v1/;\n/ {\n  #address-cells = <2>;\n  #size-cells = <2>;\n%s};\n" % body)
++    subprocess.run(["dtc", "-I", "dts", "-O", "dtb", "-o", str(output), str(source)],
++                   check=True, capture_output=True)
++    return output.read_bytes()
++
++
++class OnyxHandoffTests(unittest.TestCase):
++    @classmethod
++    def setUpClass(cls):
++        cls.temp = tempfile.TemporaryDirectory()
++        cls.addClassCleanup(cls.temp.cleanup)
++        cls.dir = Path(cls.temp.name)
++        cls.lib = ctypes.CDLL(str(build_library(cls.dir / "libonyx.so")))
++        cls.lib.OnyxValidateFdtHandoff.restype = ctypes.c_uint64
++        cls.lib.OnyxValidateFdtHandoff.argtypes = [ctypes.c_uint64, ctypes.c_void_p]
++        cls.lib.OnyxHostMapBase.restype = ctypes.c_void_p
++        cls.lib.OnyxHostMapBase.argtypes = []
++        cls.map = (ctypes.c_ubyte * (32 * REGION_STRUCT)).from_address(cls.lib.OnyxHostMapBase())
++        cls.lib.OnyxValidateHandoffRanges.restype = ctypes.c_uint64
++        cls.lib.OnyxValidateHandoffRanges.argtypes = [
++            ctypes.c_uint64, ctypes.c_uint64, ctypes.c_uint64, ctypes.c_uint64,
++            ctypes.c_void_p, ctypes.c_uint64, ctypes.c_void_p]
++
++    def set_map_count(self, count: int):
++        ctypes.c_ubyte.in_dll(self.lib, "gHostMapCount").value = count
++
++    def setUp(self):
++        self.set_map_count(0)
++        self.result = (ctypes.c_uint64 * 5)()
++
++    def add_region(self, name: str, base: int, size: int):
++        index = ctypes.c_ubyte.in_dll(self.lib, "gHostMapCount").value
++        struct.pack_into("<32sQQIIIII", self.map, index * REGION_STRUCT,
++                         name.encode()[:31].ljust(32, b"\0"), base, size, 1, 7, 0, 0, 0)
++        self.set_map_count(index + 1)
++
++    def board_map(self, extra=None):
++        self.add_region("Kernel", KERNEL_BASE, KERNEL_SIZE)
++        self.add_region("XBL_DT", XBL_DT_BASE, XBL_DT_SIZE)
++        if extra:
++            self.add_region(*extra)
++
++    def ranges(self, fdt, size, start, end, regions):
++        array = (ctypes.c_uint64 * (2 * len(regions)))(*[value for pair in regions for value in pair])
++        return self.lib.OnyxValidateHandoffRanges(
++            fdt, size, start, end, ctypes.cast(array, ctypes.c_void_p), len(regions),
++            ctypes.cast(self.result, ctypes.c_void_p))
++
++    # --- full parse path against real libfdt -------------------------------
++
++    def test_full_parse_accepts_valid_tree(self):
++        blob = make_dtb(self.dir, "  chosen {\n    linux,initrd-start = <0x00 0x88000000>;\n"
++                                  "    linux,initrd-end = <0x00 0x88100000>;\n  };\n")
++        buffer = ctypes.create_string_buffer(blob, len(blob))
++        self.set_map_count(0)
++        self.add_region("Kernel", KERNEL_BASE, KERNEL_SIZE)
++        self.add_region("XBL_DT", ctypes.addressof(buffer), len(blob))
++        status = self.lib.OnyxValidateFdtHandoff(ctypes.addressof(buffer), ctypes.cast(self.result, ctypes.c_void_p))
++        self.assertEqual(status, EFI_SUCCESS)
++        self.assertEqual(self.result[0], ctypes.addressof(buffer))
++        self.assertEqual(self.result[1], len(blob))
++        self.assertEqual((self.result[2], self.result[3]), (0x88000000, 0x88100000))
++        self.assertEqual(self.result[4], 0x100)
++
++    def test_full_parse_rejects_missing_initrd(self):
++        blob = make_dtb(self.dir, "  chosen { };\n")
++        buffer = ctypes.create_string_buffer(blob, len(blob))
++        self.set_map_count(0)
++        self.add_region("Kernel", KERNEL_BASE, 0x1000)
++        self.add_region("XBL_DT", ctypes.addressof(buffer), len(blob))
++        status = self.lib.OnyxValidateFdtHandoff(ctypes.addressof(buffer), ctypes.cast(self.result, ctypes.c_void_p))
++        self.assertEqual(status, EFI_NOT_FOUND)
++
++    def test_full_parse_rejects_corrupt_tree(self):
++        blob = bytearray(make_dtb(self.dir, "  chosen {\n    linux,initrd-start = <0x00 0x88000000>;\n"
++                                        "    linux,initrd-end = <0x00 0x88100000>;\n  };\n"))
++        blob[60] ^= 0xFF
++        buffer = ctypes.create_string_buffer(bytes(blob), len(blob))
++        self.set_map_count(0)
++        self.add_region("Kernel", KERNEL_BASE, 0x1000)
++        self.add_region("XBL_DT", ctypes.addressof(buffer), len(blob))
++        status = self.lib.OnyxValidateFdtHandoff(ctypes.addressof(buffer), ctypes.cast(self.result, ctypes.c_void_p))
++        self.assertEqual(status, EFI_INVALID_PARAMETER)
++
++    def test_full_parse_rejects_untrusted_region(self):
++        blob = make_dtb(self.dir, "  chosen {\n    linux,initrd-start = <0x00 0x88000000>;\n"
++                                  "    linux,initrd-end = <0x00 0x88100000>;\n  };\n")
++        buffer = ctypes.create_string_buffer(blob, len(blob))
++        self.set_map_count(0)
++        self.add_region("Kernel", KERNEL_BASE, 0x1000)
++        # A reserved region the firmware does write (display carve-out) must not be trusted.
++        self.add_region("Display Reserved", ctypes.addressof(buffer), len(blob))
++        status = self.lib.OnyxValidateFdtHandoff(ctypes.addressof(buffer), ctypes.cast(self.result, ctypes.c_void_p))
++        self.assertNotEqual(status, EFI_SUCCESS)
++
++    # --- numeric contract -------------------------------------------------
++
++    def test_initrd_rounds_up_to_a_sector(self):
++        status = self.ranges(0x88001000, 0x2000, 0x89000000, 0x890FFE18, [(KERNEL_BASE, KERNEL_SIZE)])
++        self.assertEqual(status, EFI_SUCCESS)
++        # 0x890FFE18 -> next sector boundary 0x89100000.
++        self.assertEqual(self.result[3], 0x89100000)
++        self.assertEqual(self.result[4], 0x100)
++
++    def test_numeric_accept(self):
++        status = self.ranges(0x88001000, 0x2000, 0x89000000, 0x89100000,
++                             [(KERNEL_BASE, KERNEL_SIZE), (XBL_DT_BASE, XBL_DT_SIZE)])
++        self.assertEqual(status, EFI_SUCCESS)
++        self.assertEqual(list(self.result), [0x88001000, 0x2000, 0x89000000, 0x89100000, 0x100])
++
++    def test_numeric_rejections(self):
++        regions = [(KERNEL_BASE, KERNEL_SIZE), (XBL_DT_BASE, XBL_DT_SIZE)]
++        cases = {
++            "no initrd": (0x88001000, 0x2000, 0, 0, EFI_NOT_FOUND),
++            "empty initrd end": (0x88001000, 0x2000, 0x89000000, 0x89000000, EFI_INVALID_PARAMETER),
++            "unaligned fdt": (0x88001004, 0x2000, 0x89000000, 0x89100000, EFI_INVALID_PARAMETER),
++            "initrd outside": (0x88001000, 0x2000, 0x40000000, 0x40100000, EFI_SECURITY_VIOLATION),
++            # An unaligned bootloader length must round up inside the region, not fail.
++            "initrd unaligned end within region": (0x88001000, 0x2000, 0x89000000, 0x890FFE18, EFI_SUCCESS),
++            "inverted initrd": (0x88001000, 0x2000, 0x89100000, 0x89000000, EFI_INVALID_PARAMETER),
++            "fdt outside": (0x40000000, 0x2000, 0x89000000, 0x89100000, EFI_SECURITY_VIOLATION),
++            "zero fdt": (0, 0x2000, 0x89000000, 0x89100000, EFI_INVALID_PARAMETER),
++            "empty fdt": (0x88001000, 0, 0x89000000, 0x89100000, EFI_INVALID_PARAMETER),
++            "fdt oversize": (0x88001000, 0x2000000, 0x89000000, 0x89100000, EFI_INVALID_PARAMETER),
++        }
++        for label, (fdt, size, start, end, expected) in cases.items():
++            with self.subTest(label=label):
++                self.assertEqual(self.ranges(fdt, size, start, end, regions), expected)
++
++    def test_overlapping_ranges_rejected(self):
++        status = self.ranges(0x89000000, 0x2000, 0x89000000, 0x89100000, [(KERNEL_BASE, KERNEL_SIZE)])
++        self.assertEqual(status, EFI_SECURITY_VIOLATION)
++
++    def test_fdt_must_stay_inside_one_region(self):
++        status = self.ranges(0x88000000, 0x2000, 0x88200000, 0x88300000,
++                             [(KERNEL_BASE, 0x1000), (0x88100000, 0x1000)])
++        self.assertEqual(status, EFI_SECURITY_VIOLATION)
++
++    def test_null_result_rejected(self):
++        array = (ctypes.c_uint64 * 2)(KERNEL_BASE, KERNEL_SIZE)
++        status = self.lib.OnyxValidateHandoffRanges(
++            0x88001000, 0x2000, 0x89000000, 0x89100000, array, 1, None)
++        self.assertEqual(status, EFI_INVALID_PARAMETER)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/Tests/test_bootshim.py b/Tests/test_bootshim.py
+new file mode 100644
+index 0000000..e3da417
+--- /dev/null
++++ b/Tests/test_bootshim.py
+@@ -0,0 +1,67 @@
++#!/usr/bin/env python3
++"""Compile the real BootShim, validate its ARM64 header and disassembly.
++
++These are host regressions, not evidence of execution at EL1/EL2 on onyx.
++"""
++import re
++import shutil
++import struct
++import subprocess
++import tempfile
++import unittest
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parents[1]
++BASE, SIZE = 0xA7100000, 0x300000
++
++
++@unittest.skipUnless(all(shutil.which(t) for t in ('clang', 'llvm-objcopy', 'llvm-objdump', 'llvm-nm')), 'LLVM tools required')
++class BootShimTests(unittest.TestCase):
++    def compile(self, header):
++        with tempfile.TemporaryDirectory() as directory:
++            temp = Path(directory)
++            obj, binary = temp/'shim.o', temp/'shim.bin'
++            subprocess.run(['clang', '--target=aarch64-none-elf', '-c', f'-DFD_BASE={BASE}',
++                            f'-DFD_SIZE={SIZE}', f'-DREQUIRES_KERNEL_HEADER={header}',
++                            str(ROOT/'BootShim/BootShim.S'), '-o', str(obj)], check=True, capture_output=True)
++            subprocess.run(['llvm-objcopy', '-O', 'binary', str(obj), str(binary)], check=True)
++            symbols = subprocess.check_output(['llvm-nm', '-n', str(obj)], text=True)
++            assembly = subprocess.check_output(['llvm-objdump', '-d', '--no-show-raw-insn', str(obj)], text=True)
++            payload = int(next(line.split()[0] for line in symbols.splitlines() if line.endswith(' _Payload')), 16)
++            return binary.read_bytes(), assembly, payload
++
++    def test_header_describes_shim_and_fd(self):
++        data, _, payload = self.compile(1)
++        self.assertEqual(data[56:60], b'ARM\x64')
++        self.assertEqual(struct.unpack_from('<QQ', data, 8), (BASE, len(data)+SIZE))
++        self.assertEqual(payload, len(data), 'literal pool must precede appended FD')
++
++    def test_entry_preserves_runtime_x0(self):
++        _, assembly, _ = self.compile(1)
++        instructions = [line.split(':',1)[1].strip() for line in assembly.splitlines()
++                        if re.match(r'^\s*[0-9a-f]+:\s', line)]
++        self.assertFalse(any(re.match(r'(?:mov|add|ldr|adr|sub)\s+x0\b', ins) for ins in instructions), assembly)
++
++    def test_relocated_instructions_are_published(self):
++        for header in (0, 1):
++            with self.subTest(header=header):
++                data, assembly, payload = self.compile(header)
++                self.assertIn('dc\tcvac', assembly)
++                self.assertIn('ic\tiallu', assembly)
++                self.assertIn('dsb\tsy', assembly)
++                self.assertIn('isb', assembly)
++                self.assertEqual(payload, len(data))
++
++    def test_copy_handles_overlapping_source_and_destination(self):
++        _, assembly, _ = self.compile(1)
++        body = assembly
++        # A destination inside the source must copy downwards from the end:
++        # the forward loop alone would overwrite the bytes it still has to read.
++        self.assertIn('<_CopyBack>', body)
++        self.assertIn('ldp\tx2, x3, [x4, #-0x10]!', body)
++        self.assertIn('b.hs', assembly[:assembly.index('<_CopyLoop>:')])
++        # The dead loop must stay unreachable for overlap: only on overflow.
++        self.assertNotIn('b.lo\t0x', assembly[:assembly.index('<_CopyLoop>:')])
++
++if __name__ == '__main__':
++    unittest.main()

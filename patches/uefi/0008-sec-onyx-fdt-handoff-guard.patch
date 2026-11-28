@@ -1,0 +1,733 @@
+diff --git a/Silicon/Silicium/SiliciumPkg/Sec/OnyxHandoff.c b/Silicon/Silicium/SiliciumPkg/Sec/OnyxHandoff.c
+new file mode 100644
+index 0000000..2543e41
+--- /dev/null
++++ b/Silicon/Silicium/SiliciumPkg/Sec/OnyxHandoff.c
+@@ -0,0 +1,424 @@
++/** @file
++  Fail-closed validation of the bootloader's FDT/initrd handoff.
++
++  Copyright (c) 2026, UniXNU contributors. All rights reserved.
++  SPDX-License-Identifier: BSD-2-Clause-Patent
++**/
++
++#include "OnyxHandoff.h"
++
++#ifndef ONYX_HANDOFF_HOST
++#include <Library/DebugLib.h>
++#include <Library/FdtLib.h>
++#include <Library/MemoryMapLib.h>
++#endif
++
++//
++// libfdt is compiled into BaseFdtLib but EDK II exposes no wrapper for the
++// whole-tree check, so declare the upstream prototype here.
++//
++int fdt_check_full (const void *Fdt, size_t BufSize);
++
++#define ONYX_HANDOFF_FDT_MAGIC   0xD00DFEEDU
++#define ONYX_HANDOFF_FDT_MAX     (16U * 1024U * 1024U)
++#define ONYX_HANDOFF_SECTOR      512U
++
++//
++// Regions the firmware already reserves and never writes. Anything else that
++// happens to be reserved (display carve-outs, modem PIL regions) is rejected
++// instead of being trusted. Extend this list only with measured evidence.
++//
++STATIC CONST CHAR8 *CONST  mBoardInputRegions[] = {
++  "Kernel",
++  "XBL_DT"
++};
++
++STATIC
++BOOLEAN
++IsBoardInputName (
++  IN CONST CHAR8  *Name
++  )
++{
++  UINTN  Index;
++
++  for (Index = 0; Index < ARRAY_SIZE (mBoardInputRegions); Index++) {
++    if (AsciiStrCmp (Name, mBoardInputRegions[Index]) == 0) {
++      return TRUE;
++    }
++  }
++
++  return FALSE;
++}
++
++//
++// Reject [Start, End) when it overflows or is not fully inside one region.
++//
++//
++// Copy the reserved board input regions out of the platform memory map. Pure
++// data: it never dereferences a bootloader-supplied address.
++//
++STATIC
++UINTN
++CollectBoardInputRegions (
++  OUT ONYX_HANDOFF_REGION  *Regions,
++  IN  UINTN                Capacity
++  )
++{
++  EFI_MEMORY_REGION_DESCRIPTOR  *Map;
++  UINT8                         Count;
++  UINTN                         Found;
++
++  GetMemoryMap (&Map, &Count);
++  Found = 0;
++  for (UINTN Index = 0; (Index < Count) && (Found < Capacity); Index++) {
++    if ((Map[Index].MemoryType != EfiReservedMemoryType) ||
++        !IsBoardInputName (Map[Index].Name))
++    {
++      continue;
++    }
++
++    Regions[Found].Base = Map[Index].Address;
++    Regions[Found].Size = Map[Index].Length;
++    Found++;
++  }
++
++  return Found;
++}
++
++STATIC
++UINT64
++ReadBigEndianAddress (
++  IN CONST UINT8  *Value,
++  IN UINT32       Length
++  )
++{
++  UINT64  Result = 0;
++  UINT32  Index;
++
++  //
++  // libfdt stores /chosen addresses big-endian; bootloaders emit 32 or 64 bits.
++  //
++  for (Index = 0; Index < Length; Index++) {
++    Result = (Result << 8) | Value[Index];
++  }
++
++  return Result;
++}
++
++//
++// Diagnostic only: report which memory-map entry physically holds a range.
++// It never influences the accept/reject decision.
++//
++STATIC
++CONST CHAR8 *
++DescribeHolder (
++  IN UINT64          Start,
++  IN UINT64          End,
++  IN CONST CHAR8     *Fallback
++  )
++{
++  (VOID)Start;
++  (VOID)End;
++  return Fallback;
++}
++
++STATIC
++BOOLEAN
++RangeInsideRegion (
++  IN UINT64                Start,
++  IN UINT64                End,
++  IN CONST ONYX_HANDOFF_REGION  *Regions,
++  IN UINTN                 RegionCount
++  )
++{
++  UINTN   Index;
++  UINT64  RegionEnd;
++
++  if (End <= Start) {
++    return FALSE;
++  }
++
++  for (Index = 0; Index < RegionCount; Index++) {
++    if (Regions[Index].Size == 0) {
++      continue;
++    }
++
++    RegionEnd = Regions[Index].Base + Regions[Index].Size;
++    if ((RegionEnd < Regions[Index].Base) ||
++        (Start < Regions[Index].Base) || (Start >= RegionEnd))
++    {
++      continue;
++    }
++
++    if (End <= RegionEnd) {
++      return TRUE;
++    }
++  }
++
++  return FALSE;
++}
++
++STATIC
++BOOLEAN
++RangesOverlap (
++  IN UINT64  AStart,
++  IN UINT64  AEnd,
++  IN UINT64  BStart,
++  IN UINT64  BEnd
++  )
++{
++  return (AStart < BEnd) && (BStart < AEnd);
++}
++
++/**
++  Validate the numeric FDT and initrd ranges against the board input regions.
++
++  @copydoc OnyxValidateHandoffRanges
++**/
++EFI_STATUS
++EFIAPI
++OnyxValidateHandoffRanges (
++  IN  UINT64                       FdtAddress,
++  IN  UINT64                       FdtSize,
++  IN  UINT64                       InitrdStart,
++  IN  UINT64                       InitrdEnd,
++  IN  CONST ONYX_HANDOFF_REGION     *Regions,
++  IN  UINTN                        RegionCount,
++  OUT ONYX_HANDOFF_RESULT          *Result
++  )
++{
++  UINT64  FdtEnd;
++  UINT64  InitrdBytes;
++  UINT64  InitrdPages;
++
++  if ((Result == NULL) || (Regions == NULL) || (RegionCount == 0)) {
++    return EFI_INVALID_PARAMETER;
++  }
++
++  if (FdtAddress == 0) {
++    DEBUG ((DEBUG_ERROR, "ONYX: bootloader passed no runtime FDT (x0 = 0)\n"));
++    return EFI_INVALID_PARAMETER;
++  }
++
++  //
++  // The handoff must stay 8-byte aligned: libfdt reads 64-bit header words.
++  //
++  if ((FdtAddress & 7) != 0) {
++    DEBUG ((DEBUG_ERROR, "ONYX: FDT address 0x%lx is not 8-byte aligned\n", FdtAddress));
++    return EFI_INVALID_PARAMETER;
++  }
++
++  if ((FdtSize == 0) || (FdtSize > ONYX_HANDOFF_FDT_MAX)) {
++    DEBUG ((DEBUG_ERROR, "ONYX: FDT size 0x%lx is outside the accepted range\n", FdtSize));
++    return EFI_INVALID_PARAMETER;
++  }
++
++  FdtEnd = FdtAddress + FdtSize;
++  if (FdtEnd < FdtAddress) {
++    DEBUG ((DEBUG_ERROR, "ONYX: FDT range 0x%lx+0x%lx overflows\n", FdtAddress, FdtSize));
++    return EFI_INVALID_PARAMETER;
++  }
++
++  //
++  // Before storage adaptation the FAT payload is the only source of an
++  // entry table, so a missing initrd has to be reported, not tolerated.
++  //
++  if ((InitrdStart == 0) || (InitrdEnd == 0)) {
++    DEBUG ((DEBUG_ERROR, "ONYX: FDT has no /chosen/linux,initrd-start|end; refusing handoff\n"));
++    return EFI_NOT_FOUND;
++  }
++
++  if (InitrdEnd <= InitrdStart) {
++    DEBUG ((DEBUG_ERROR, "ONYX: initrd range 0x%lx..0x%lx is empty or inverted\n", InitrdStart, InitrdEnd));
++    return EFI_INVALID_PARAMETER;
++  }
++
++  //
++  // The bootloader reports the payload's exact byte length, which onyx does
++  // not round to a sector (a live capture ended at 0x...eb18). Block devices
++  // are sector-granular, so round the end up and keep the padded range inside
++  // the same reserved region: the trailing bytes are read, never written.
++  //
++  InitrdBytes = InitrdEnd - InitrdStart;
++  InitrdEnd   = InitrdStart + ((InitrdBytes + ONYX_HANDOFF_SECTOR - 1) / ONYX_HANDOFF_SECTOR) * ONYX_HANDOFF_SECTOR;
++  if (InitrdEnd < InitrdStart) {
++    DEBUG ((DEBUG_ERROR, "ONYX: initrd range 0x%lx..0x%lx overflows when rounded\n", InitrdStart, InitrdBytes));
++    return EFI_INVALID_PARAMETER;
++  }
++
++  if (!RangeInsideRegion (FdtAddress, FdtEnd, Regions, RegionCount)) {
++    // Name the region that does hold the FDT so one logged boot identifies the
++    // board-input set that needs to be extended.
++    DEBUG ((DEBUG_ERROR, "ONYX: FDT 0x%lx..0x%lx is not inside a reserved board input region (nearest: %a)\n",
++            FdtAddress, FdtEnd, DescribeHolder (FdtAddress, FdtEnd, "unmapped")));
++    return EFI_SECURITY_VIOLATION;
++  }
++
++  if (!RangeInsideRegion (InitrdStart, InitrdEnd, Regions, RegionCount)) {
++    DEBUG ((DEBUG_ERROR, "ONYX: initrd 0x%lx..0x%lx is not inside a reserved board input region\n", InitrdStart, InitrdEnd));
++    return EFI_SECURITY_VIOLATION;
++  }
++
++  if (RangesOverlap (FdtAddress, FdtEnd, InitrdStart, InitrdEnd)) {
++    DEBUG ((DEBUG_ERROR, "ONYX: FDT and initrd ranges overlap\n"));
++    return EFI_SECURITY_VIOLATION;
++  }
++
++  InitrdPages = ((InitrdEnd - InitrdStart) + SIZE_4KB - 1) / SIZE_4KB;
++
++  Result->FdtAddress  = FdtAddress;
++  Result->FdtSize     = FdtSize;
++  Result->InitrdStart = InitrdStart;
++  Result->InitrdEnd   = InitrdEnd;
++  Result->InitrdPages = InitrdPages;
++  return EFI_SUCCESS;
++}
++
++//
++// Return the /chosen address as a host integer, or 0 when absent/malformed.
++// Bootloaders emit either 32-bit or 64-bit big-endian values.
++//
++STATIC
++UINT64
++ReadChosenAddress (
++  IN  CONST VOID   *Fdt,
++  IN  INT32        Chosen,
++  IN  CONST CHAR8  *Name,
++  OUT INT32        *Length
++  )
++{
++  CONST FDT_PROPERTY  *Property;
++
++  Property = FdtGetProperty (Fdt, Chosen, Name, Length);
++  if ((Property == NULL) || (Length == NULL)) {
++    return 0;
++  }
++
++  if ((*Length != sizeof (UINT32)) && (*Length != sizeof (UINT64))) {
++    return 0;
++  }
++
++  return ReadBigEndianAddress ((CONST UINT8 *)Property->Data, (UINT32)*Length);
++}
++
++STATIC
++UINT32
++ReadFdtTotalSize (
++  IN CONST VOID  *Fdt
++  )
++{
++  //
++  // Header word 1 is `totalsize`, big-endian (devicetree specification v0.4).
++  //
++  return ReadBigEndianAddress ((CONST UINT8 *)Fdt + 4, sizeof (UINT32));
++}
++
++/**
++  Parse the bootloader FDT and validate its handoff.
++
++  @copydoc OnyxValidateFdtHandoff
++**/
++EFI_STATUS
++EFIAPI
++OnyxValidateFdtHandoff (
++  IN  UINT64               FdtAddress,
++  OUT ONYX_HANDOFF_RESULT  *Result
++  )
++{
++  EFI_STATUS                    Status;
++  VOID                          *Fdt;
++  ONYX_HANDOFF_REGION           Regions[16];
++  UINTN                         RegionCount;
++  UINT32                        TotalSize;
++  INT32                         Chosen;
++  INT32                         Length;
++  UINT64                        InitrdStart;
++  UINT64                        InitrdEnd;
++
++  if (Result == NULL) {
++    return EFI_INVALID_PARAMETER;
++  }
++
++  if (FdtAddress == 0) {
++    DEBUG ((DEBUG_ERROR, "ONYX: bootloader passed no runtime FDT (x0 = 0)\n"));
++    return EFI_INVALID_PARAMETER;
++  }
++
++  if ((FdtAddress & 7) != 0) {
++    DEBUG ((DEBUG_ERROR, "ONYX: FDT address 0x%lx is not 8-byte aligned\n", FdtAddress));
++    return EFI_INVALID_PARAMETER;
++  }
++
++  //
++  // Establish ownership BEFORE the first load. An unvalidated x0 may point at
++  // unmapped or device memory, and dereferencing it raises a data abort that
++  // aborts the whole SEC stage. Only read the header once the address is known
++  // to sit inside a reserved board input region.
++  //
++  RegionCount = CollectBoardInputRegions (Regions, ARRAY_SIZE (Regions));
++  if (RegionCount == 0) {
++    DEBUG ((DEBUG_ERROR, "ONYX: the board memory map exposes no reserved boot input region\n"));
++    return EFI_NOT_FOUND;
++  }
++
++  if (!RangeInsideRegion (FdtAddress, FdtAddress + sizeof (UINT32) * 10, Regions, RegionCount)) {
++    DEBUG ((DEBUG_ERROR, "ONYX: x0 = 0x%lx is not a reserved board input address; not reading it\n", FdtAddress));
++    return EFI_SECURITY_VIOLATION;
++  }
++
++  Fdt = (VOID *)(UINTN)FdtAddress;
++  if (FdtCheckHeader (Fdt) != 0) {
++    DEBUG ((DEBUG_ERROR, "ONYX: runtime FDT 0x%lx has no valid header\n", FdtAddress));
++    return EFI_INVALID_PARAMETER;
++  }
++
++  TotalSize = ReadFdtTotalSize (Fdt);
++  if ((TotalSize < sizeof (UINT32) * 4) || (TotalSize > ONYX_HANDOFF_FDT_MAX)) {
++    DEBUG ((DEBUG_ERROR, "ONYX: runtime FDT total size 0x%x is not usable\n", TotalSize));
++    return EFI_INVALID_PARAMETER;
++  }
++
++  //
++  // A header-only check accepts a truncated or corrupted tree, and this tree
++  // decides where the payload lives, so require the full structural walk.
++  //
++  if (fdt_check_full (Fdt, TotalSize) != 0) {
++    DEBUG ((DEBUG_ERROR, "ONYX: runtime FDT 0x%lx fails the full tree check\n", FdtAddress));
++    return EFI_INVALID_PARAMETER;
++  }
++
++  Chosen = FdtPathOffset (Fdt, "/chosen");
++  if (Chosen < 0) {
++    DEBUG ((DEBUG_ERROR, "ONYX: runtime FDT has no /chosen node\n"));
++    return EFI_NOT_FOUND;
++  }
++
++  Length      = 0;
++  InitrdStart = ReadChosenAddress (Fdt, Chosen, "linux,initrd-start", &Length);
++
++  Length    = 0;
++  InitrdEnd = ReadChosenAddress (Fdt, Chosen, "linux,initrd-end", &Length);
++
++  Status = OnyxValidateHandoffRanges (
++             FdtAddress,
++             TotalSize,
++             InitrdStart,
++             InitrdEnd,
++             Regions,
++             RegionCount,
++             Result
++             );
++  if (!EFI_ERROR (Status)) {
++    DEBUG ((
++      DEBUG_WARN,
++      "ONYX: handoff accepted; FDT 0x%lx+0x%x, initrd 0x%lx..0x%lx (%ld pages)\n",
++      Result->FdtAddress,
++      (UINT32)Result->FdtSize,
++      Result->InitrdStart,
++      Result->InitrdEnd,
++      Result->InitrdPages
++      ));
++  }
++
++  return Status;
++}
+diff --git a/Silicon/Silicium/SiliciumPkg/Sec/OnyxHandoff.h b/Silicon/Silicium/SiliciumPkg/Sec/OnyxHandoff.h
+new file mode 100644
+index 0000000..a946205
+--- /dev/null
++++ b/Silicon/Silicium/SiliciumPkg/Sec/OnyxHandoff.h
+@@ -0,0 +1,93 @@
++/** @file
++  Fail-closed validation of the bootloader's FDT/initrd handoff.
++
++  The Android bootloader passes x0 = runtime FDT. `/chosen/linux,initrd-start`
++  and `linux,initrd-end` describe the FAT payload that UniXNURamDiskDxe turns
++  into a block device. Firmware must not publish that handoff unless the two
++  ranges are provably inside memory the firmware keeps reserved.
++
++  This module performs no copying, mapping or allocation. It only decides
++  whether the incoming ranges may be published, so it cannot itself undo an
++  earlier overwrite; BootShim and the SEC stack are checked separately.
++
++  Copyright (c) 2026, UniXNU contributors. All rights reserved.
++  SPDX-License-Identifier: BSD-2-Clause-Patent
++**/
++
++#ifndef ONYX_FDT_HANDOFF_H_
++#define ONYX_FDT_HANDOFF_H_
++
++#ifdef ONYX_HANDOFF_HOST
++#include "onyx_host_shim.h"
++#else
++#include <Uefi.h>
++#endif
++
++//
++// A board input region: a memory map entry the firmware already keeps
++// reserved and never writes (it holds bootloader-supplied data).
++//
++typedef struct {
++  UINT64    Base;
++  UINT64    Size;
++} ONYX_HANDOFF_REGION;
++
++//
++// Accepted handoff, reported only when every check passed.
++//
++typedef struct {
++  UINT64    FdtAddress;
++  UINT64    FdtSize;
++  UINT64    InitrdStart;
++  UINT64    InitrdEnd;
++  UINT64    InitrdPages;
++} ONYX_HANDOFF_RESULT;
++
++/**
++  Validate the numeric FDT and initrd ranges against the board input regions.
++
++  Both ranges must lie inside a single board input region, must not overflow,
++  must not overlap each other and the initrd must be a whole number of
++  512-byte sectors. A missing initrd is an error, never a silent downgrade.
++
++  @param[in]  FdtAddress   Runtime FDT address from the bootloader.
++  @param[in]  FdtSize      FDT total size in bytes.
++  @param[in]  InitrdStart  /chosen/linux,initrd-start, 0 when absent.
++  @param[in]  InitrdEnd    /chosen/linux,initrd-end, 0 when absent.
++  @param[in]  Regions      Board input regions.
++  @param[in]  RegionCount  Number of entries in Regions.
++  @param[out] Result       Receives the accepted handoff on success only.
++
++  @retval EFI_SUCCESS            The handoff may be published.
++  @retval EFI_INVALID_PARAMETER  Argument, alignment or range defect.
++  @retval EFI_NOT_FOUND          No initrd properties.
++  @retval EFI_SECURITY_VIOLATION A range is not inside reserved board input.
++**/
++EFI_STATUS
++EFIAPI
++OnyxValidateHandoffRanges (
++  IN  UINT64                       FdtAddress,
++  IN  UINT64                       FdtSize,
++  IN  UINT64                       InitrdStart,
++  IN  UINT64                       InitrdEnd,
++  IN  CONST ONYX_HANDOFF_REGION     *Regions,
++  IN  UINTN                        RegionCount,
++  OUT ONYX_HANDOFF_RESULT          *Result
++  );
++
++/**
++  Parse the bootloader FDT and validate its handoff.
++
++  @param[in]  FdtAddress  Runtime FDT address received in x0.
++  @param[out] Result      Receives the accepted handoff on success only.
++
++  @return EFI_STATUS from OnyxValidateHandoffRanges, or an FDT parse error.
++**/
++EFI_STATUS
++EFIAPI
++OnyxValidateFdtHandoff (
++  IN  UINT64               FdtAddress,
++  OUT ONYX_HANDOFF_RESULT  *Result
++  );
++
++#endif /* ONYX_FDT_HANDOFF_H_ */
+diff --git a/Silicon/Silicium/SiliciumPkg/Sec/Sec.c b/Silicon/Silicium/SiliciumPkg/Sec/Sec.c
+index dd85d0d..b29b10d 100644
+--- a/Silicon/Silicium/SiliciumPkg/Sec/Sec.c
++++ b/Silicon/Silicium/SiliciumPkg/Sec/Sec.c
+@@ -24,6 +24,12 @@ STATIC CONST EFI_GUID mEntryArgHobGuid = {
+ 
+ #include "Sec.h"
+ 
++#ifdef ONYX_FDT_HANDOFF
++#include "OnyxHandoff.h"
++
++STATIC ONYX_HANDOFF_RESULT mHandoff;
++#endif
++
+ #ifndef MDEPKG_NDEBUG
+ STATIC
+ VOID
+@@ -102,6 +108,21 @@ SecMain (
+ {
+   EFI_STATUS Status;
+ 
++#ifdef ONYX_FDT_HANDOFF
++  BOOLEAN HandoffValid;
++#endif
++
++#ifdef ONYX_FDT_HANDOFF
++  //
++  // Decide the bootloader handoff before this stage creates the HOB arena,
++  // translation tables or any allocation, so a rejected range is never
++  // published to UniXNURamDiskDxe. The SEC stack and the BootShim copy have
++  // already run by now; OnyxValidateHandoffRanges only proves the ranges live
++  // in memory reserved by the board map, it cannot undo an earlier overwrite.
++  //
++  HandoffValid = !EFI_ERROR (OnyxValidateFdtHandoff (Arg0, &mHandoff));
++#endif
++
+   // Do Platform Specific Initialization
+   PlatformInitialize ();
+ 
+@@ -127,7 +148,17 @@ SecMain (
+   }
+ 
+   // Store x0 (DTB address) in HOB for UniXNURamDiskDxe
++#ifdef ONYX_FDT_HANDOFF
++  if (HandoffValid) {
++    BuildGuidDataHob (&mEntryArgHobGuid, &Arg0, sizeof (UINT64));
++  } else {
++    // No silent downgrade: the payload is absent from the menu and the
++    // reason is in the log. Boot continues so the log stays reachable.
++    DEBUG ((EFI_D_ERROR, "ONYX: handoff rejected; UniXNURamDiskDxe will not be started\n"));
++  }
++#else
+   BuildGuidDataHob (&mEntryArgHobGuid, &Arg0, sizeof (UINT64));
++#endif
+ 
+   // Build CPU HOB
+   BuildCpuHob (ArmGetPhysicalAddressBits (), PcdGet8 (PcdPrePiCpuIoSize));
+diff --git a/Silicon/Silicium/SiliciumPkg/Sec/Sec.inf b/Silicon/Silicium/SiliciumPkg/Sec/Sec.inf
+index 79afd19..0d2464a 100644
+--- a/Silicon/Silicium/SiliciumPkg/Sec/Sec.inf
++++ b/Silicon/Silicium/SiliciumPkg/Sec/Sec.inf
+@@ -1,69 +1,73 @@
+-##
+-#  Copyright (c) 2015 Hewlett-Packard Development Company, L.P.
+-#  Copyright (c) 2011-2017, ARM Ltd. All rights reserved.
+-#  Copyright (c) 2020, Arm Limited. All rights reserved.
+-#
+-#  SPDX-License-Identifier: BSD-2-Clause-Patent
+-##
+-
+-[Defines]
+-  INF_VERSION                    = 0x00010005
+-  BASE_NAME                      = Sec
+-  FILE_GUID                      = 9AFFB503-E643-4141-8B90-17E8588B1D35
+-  MODULE_TYPE                    = SEC
+-  VERSION_STRING                 = 1.0
+-
+-[Sources]
+-  Sec.c
+-
+-[Sources.AArch64]
+-  AArch64/ArchSec.c
+-  AArch64/Exception.S
+-  AArch64/Helper.S
+-  AArch64/ModuleEntryPoint.S
+-
+-[Packages]
+-  ArmPkg/ArmPkg.dec
+-  MdePkg/MdePkg.dec
+-  ArmPlatformPkg/ArmPlatformPkg.dec
+-  MdeModulePkg/MdeModulePkg.dec
+-  EmbeddedPkg/EmbeddedPkg.dec
+-  SiliciumPkg/SiliciumPkg.dec
+-
+-[LibraryClasses]
+-  ArmLib
+-  PrePiLib
+-  DebugLib
+-  DebugAgentLib
+-  BaseMemoryLib
+-  PlatformSecLib
+-  PrePiHobListPointerLib
+-  CacheMaintenanceLib
+-  MemoryMapHelperLib
+-  MemoryInitPeiLib
+-  PlatformPeiLib
+-  SerialPortLib
+-  PrintLib
+-  TimerLib
+-  HobLib
+-
+-[Ppis]
+-  gArmMpCoreInfoPpiGuid
+-
+-[Guids]
+-  gArmMpCoreInfoGuid
+-
+-[Pcd]
+-  gEfiMdeModulePkgTokenSpaceGuid.PcdFirmwareVersionString
+-
+-[FixedPcd]
+-  gArmPlatformTokenSpaceGuid.PcdCPUCoresStackBase
+-  gArmPlatformTokenSpaceGuid.PcdCPUCorePrimaryStackSize
+-
+-  gArmTokenSpaceGuid.PcdFdBaseAddress
+-  gArmTokenSpaceGuid.PcdFdSize
+-
+-  gSiliciumPkgTokenSpaceGuid.PcdSmbiosSystemManufacturer
+-  gSiliciumPkgTokenSpaceGuid.PcdSmbiosSystemModel
+-
+-  gEmbeddedTokenSpaceGuid.PcdPrePiCpuIoSize
++##
++#  Copyright (c) 2015 Hewlett-Packard Development Company, L.P.
++#  Copyright (c) 2011-2017, ARM Ltd. All rights reserved.
++#  Copyright (c) 2020, Arm Limited. All rights reserved.
++#
++#  SPDX-License-Identifier: BSD-2-Clause-Patent
++##
++
++[Defines]
++  INF_VERSION                    = 0x00010005
++  BASE_NAME                      = Sec
++  FILE_GUID                      = 9AFFB503-E643-4141-8B90-17E8588B1D35
++  MODULE_TYPE                    = SEC
++  VERSION_STRING                 = 1.0
++
++[Sources]
++  Sec.c
++  OnyxHandoff.c
++  OnyxHandoff.h
++
++[Sources.AArch64]
++  AArch64/ArchSec.c
++  AArch64/Exception.S
++  AArch64/Helper.S
++  AArch64/ModuleEntryPoint.S
++
++[Packages]
++  ArmPkg/ArmPkg.dec
++  MdePkg/MdePkg.dec
++  ArmPlatformPkg/ArmPlatformPkg.dec
++  MdeModulePkg/MdeModulePkg.dec
++  EmbeddedPkg/EmbeddedPkg.dec
++  SiliciumPkg/SiliciumPkg.dec
++
++[LibraryClasses]
++  ArmLib
++  PrePiLib
++  DebugLib
++  DebugAgentLib
++  BaseMemoryLib
++  PlatformSecLib
++  PrePiHobListPointerLib
++  CacheMaintenanceLib
++  MemoryMapHelperLib
++  MemoryMapLib
++  FdtLib
++  MemoryInitPeiLib
++  PlatformPeiLib
++  SerialPortLib
++  PrintLib
++  TimerLib
++  HobLib
++
++[Ppis]
++  gArmMpCoreInfoPpiGuid
++
++[Guids]
++  gArmMpCoreInfoGuid
++
++[Pcd]
++  gEfiMdeModulePkgTokenSpaceGuid.PcdFirmwareVersionString
++
++[FixedPcd]
++  gArmPlatformTokenSpaceGuid.PcdCPUCoresStackBase
++  gArmPlatformTokenSpaceGuid.PcdCPUCorePrimaryStackSize
++
++  gArmTokenSpaceGuid.PcdFdBaseAddress
++  gArmTokenSpaceGuid.PcdFdSize
++
++  gSiliciumPkgTokenSpaceGuid.PcdSmbiosSystemManufacturer
++  gSiliciumPkgTokenSpaceGuid.PcdSmbiosSystemModel
++
++  gEmbeddedTokenSpaceGuid.PcdPrePiCpuIoSize
