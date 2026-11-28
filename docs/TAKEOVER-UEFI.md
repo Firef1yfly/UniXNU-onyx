@@ -342,7 +342,7 @@ Checked against the device repository specification
 | `README.md`, `AGENTS.md` with scope, commands and guide links | done, in English and Chinese |
 | `.gitignore`, `local.toml.example` | done; local paths and generated output ignored |
 | `unixnu` GitHub topic | added and verified |
-| `.github/workflows/porting-record.yml`, `package.yml` | written; not pushed yet because the current token lacks the `workflow` scope |
+| `.github/workflows/porting-record.yml`, `package.yml` | pushed; the `Porting record` check passes on `main` |
 | `board.example` | stays `true`; the hardware inputs are incomplete and the specification forbids claiming otherwise |
 
 `check-inputs.py` still fails closed, as it must while the DRAM evidence and
