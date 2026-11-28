@@ -1,70 +1,109 @@
 # UniXNU — Redmi Turbo 4 Pro (onyx)
 
-**Experimental reconstruction; no successful device boot is claimed.** The original configuration remains in `origin/main`; development takes place on `rebuild/onyx-evidence-first`. Nothing has been pushed or flashed.
+**Experimental reconstruction. No successful UEFI boot is claimed yet.** The original
+configuration remains in `origin/main`; development happens on
+`port/onyx-uefi-handoff`. Nothing has been flashed.
 
 ## Current scope
 
-- Target: Redmi Turbo 4 Pro, codename `onyx`, SM8735.
-- Provisional OS profile: upstream `ipados-17.7.11-21H461`, not a custom `ios-*` profile.
-- `board.example = true` deliberately prevents treating unfinished inputs as production configuration.
-- The selected generic components are not proof of storage, display, touch, GPU, network or power support.
-- Active stock-image baseline: the user-reported Android 17 archive; see [current-image inspection](docs/CURRENT-ANDROID17.md). Earlier loose Android 16 images are historical only.
-- A minimal local [SM8735 profile](soc/README.md) now describes confirmed core resources. It is not a complete shared platform implementation.
-- The selected minimal DTS retains zero-size DRAM until runtime evidence is available; neither kernel nor firmware is build-qualified.
-- Binding tests require `dtc` and the local main-checkout ADT zero-DRAM rejection fix documented in the current-image inspection.
-- [UEFI handoff audit](docs/UEFI-HANDOFF.md) identifies BootShim header/x0 issues and unresolved SEC buffer ownership. A tested source patch is a candidate only, not applied to the original firmware.
-- Use the offline [runtime-memory evidence guide](docs/RUNTIME-MEMORY.md) to distinguish static image trees from actual runtime captures; no RAM range is inferred automatically.
-- The [C handoff planner](package/HandoffPlan/README.md) is host-tested and cross-compiles, but has no firmware integration, physical memory access or allocation side effects.
+- Target: Redmi Turbo 4 Pro, codename `onyx`, SM8735, running OS `4.0.4.0.XOLCNXM`
+  (fingerprint `Redmi/onyx/onyx:17/CP2A.260605.016/OS4.0.4.0.XOLCNXM:user/release-keys`).
+- Provisional OS profile: upstream `ipados-17.7.11-21H461`.
+- `board.example = true` deliberately keeps unfinished inputs from being treated as
+  production configuration.
+- The selected generic components are not proof of storage, display, touch, GPU,
+  network or power support.
+- The minimal DTS retains zero-size DRAM on purpose; no memory range is inferred
+  from another SM8735 phone.
+- Firmware status is `planned` in [porting.toml](porting.toml); all areas remain
+  unverified on hardware.
 
-See [reconstruction status](docs/ONYX-REBUILD.md) for source pins, missing inputs and the next measurements. [porting.toml](porting.toml) tracks subsystem status; all areas remain planned.
+## Where the firmware stands
 
-## UEFI build result
+A DEBUG CLANGPDB Mu-Silicium build succeeds and the resulting 3 MiB volume passes
+an offline, byte-level acceptance check. The boot loader accepts the image, but no
+firmware output has been observed yet. Read
+[the takeover record](docs/TAKEOVER-UEFI.md) before changing anything here.
 
-A reproducible DEBUG Mu-Silicium UEFI build now succeeds in an isolated tree based on Firef1yfly/Mu-Silicium commit `f77f9457b82f4a1dd33a305ab6ff12591347d416`, with the onyx PE file alignment changed to `0x1000` so GenFv accepts DiskIoDxe. The build includes UniXNU, UniXNURamDiskDxe, UniXNUDxe, DarwinBoot, DiskIo, Partition, UnicodeCollation and FAT.
+### The onyx boot loader adds `text_offset` to the jump address
+
+This is the most important board fact discovered so far, and it invalidates every
+earlier "accepted by fastboot, black screen" observation:
+
+| Field | stock `boot_a` | stock packer output |
+| --- | --- | --- |
+| `text_offset` (offset 8) | `0x0` | `0xa7100000` (firmware base) |
+
+The ABL computes `jump = load address + text_offset`. Writing the firmware base in
+that field sends the CPU past the end of RAM, so the image reports `Booting OKAY`,
+never executes, and the board falls back to fastboot. A self-branching probe shim
+hung the device only after that field was zeroed, which confirms the mechanism.
+
+Any packaging step must zero `text_offset` in the packed image after the packer
+verifies its own output, and record the original value in `boot.json`.
+
+Signing is not the obstacle: a stock image with one byte flipped still boots.
+
+## Verifying a firmware volume
+
+The acceptance check parses the FD bytes — outer compact FV, guided LZMA inner FV,
+then FFS module GUIDs read from the UniXNU and Mu_Basecore sources. It also requires
+the SEC handoff guard's diagnostic markers to appear in the compact volume, because
+`Sec.inf` lives there and not in the decompressed inner volume.
 
 ```sh
-PATH="$HOME/.local/bin:$PATH" CLANGPDB_AARCH64_PREFIX=aarch64-linux-gnu- \
-  build -p Platforms/Xiaomi/onyxPkg/onyx.dsc -a AARCH64 -b DEBUG \
-  -t CLANGPDB -n 2 -D FD_BASE=0xa7100000 -D FD_SIZE=0x300000 \
-  -D FD_BLOCKS=0x300 -D DEVICE_MODEL=onyx -D ENABLE_SECUREBOOT=0
+python3 scripts/accept-firmware.py \
+  --fd ../Mu-Silicium/Build/onyxPkg/DEBUG_CLANGPDB/FV/SILICIUM_UEFI.fd \
+  --unixnu ../UniXNU --uefi ../Mu-Silicium --json docs/firmware-acceptance.json
 ```
 
-The verified 3 MiB firmware volume is `artifacts/SILICIUM_UEFI-onyx-DEBUG.fd`, SHA-256 `afa660579c245ca8d5bc8e474ed45428b99233341e552cbb52045536bf111eb5`. A separate candidate image combines the 112-byte handoff-fixed BootShim with that FD; it is host-built only and has SHA-256 `ecd4b4f060b257d8f3b4433584ccdf3de10624634a394ae16f840a833afe68fe`.
+Required modules: UniXNU, UniXNUDxe, DarwinBoot, UniXNURamDiskDxe, DiskIoDxe,
+PartitionDxe, FAT, English Unicode collation, AdvancedLogDxe. The check is
+structural only; it does not prove dispatch, memory safety or boot.
 
-The BootShim fix writes the shim-plus-FD image size and preserves runtime `x0` rather than replacing it with a static appended DTB. It is source/host validated, not yet device validated. The connected Android 17 device supplied a live FDT hash `2c4ed066c378da1c56bca564c0bb221f7652d3367f5d27f57f2e4cc4f7364b18` with initrd `0xb5921000..0xb7ffeb04`; this does not prove custom UEFI allocator ownership or successful boot.
-
-The first physical test was performed with `fastboot boot` only, never `fastboot flash`. A menu-only 64 MiB FAT payload was packed into Android v4 image `menu-boot.img` (SHA-256 `2129bc06f2073c389a5838315e5a8855bb382322718f8c343119f8887b7cbccf`). Fastboot accepted and reported `Booting OKAY`, but the phone remained black and did not expose ADB; after `fastboot reboot`, Android recovered on slot `_b` with `sys.boot_completed=1` and `ro.boot.bootreason=bootloader`. No pstore output was available. This is a failed/unobserved UEFI-menu test, not evidence of bootability. Do not repeat the test without serial/USB handoff logging.
-The local Mu repository has commit `48d309fa9c5c360d57d2ce4dc2fce1cdb82b6d23` containing the BootShim/alignment fixes and copied UniXNU/DarwinBoot sources. The requested GitHub remote is configured, but publishing was not possible because this environment has no GitHub credentials (`git push` failed while reading the HTTPS username). No flash command or partition write was performed.
-
+## Checks
 
 ```sh
-python3 -m unittest discover -s tests -v
-python3 scripts/check-inputs.py --unixnu ../unixnu
-python3 scripts/check-inputs.py --unixnu ../unixnu --json
-python3 ../unixnu/scripts/porting-record.py check --device .
+python3 -m unittest tests.test_accept_firmware tests.test_port_policy tests.test_payload_config
+python3 scripts/check-payload-config.py ../menu-payload/EFI/UniXNU/unixnu.toml --unixnu ../UniXNU --require-tools
+python3 scripts/check-inputs.py --unixnu ../UniXNU       # expected to fail closed
+python3 ../UniXNU/scripts/porting-record.py check --device .
 ```
 
-The input check is **expected to fail** until the missing sources and board evidence are supplied. It performs no network request, build, adb/fastboot command or device write. A passing lint result is not a successful build or a safe/bootable image. The independent porting-record check validates record structure only.
+`check-inputs.py` failing is correct while the example gate, DRAM evidence and
+`inputs.toml` provenance are missing; do not weaken it to get a green result.
 
-The checker uses a private, local `inputs.toml` evidence index, not an upstream board schema extension:
+`check-payload-config.py` exists because a payload that looks right can be
+silently ignored: `[ui] tools = true` is not read by `Config.c` (Tools is an entry
+action), and unknown keys produce no error — the menu then has no way to reach the
+QR log exporter.
 
-```toml
-[device]
-name = "onyx"
-firmware_version = "<version of the captured stock firmware>"
-[memory]
-source = "<path or URL identifying original onyx board evidence>"
-sha256 = "<SHA-256 of that original evidence>"
-```
+## Firmware patches
 
-Do not fill this with guessed values or hashes of an unrelated board. The checker validates declaration format, not authenticity or complete memory-map safety. Keep identity seeds and private captures out of Git.
+The Mu-Silicium side is carried as a series in [patches/uefi](patches/uefi):
+
+| Patch | Contents |
+| --- | --- |
+| `0001`, `0002` | historical runtime-FDT and Advanced Logger work |
+| `0003` | historical BDS platform option |
+| `0007` | BootShim: header describes shim plus FD, runtime `x0` preserved, relocation published with `dc cvac`/`dsb`/`ic iallu`/`isb`, overlap resolved by a backwards copy |
+| `0008` | SEC: fail-closed FDT/initrd handoff guard, ownership decided before any dereference |
+| `0009` | DSC/FDF: UniXNU stack, Advanced Logger, `FdtLib`, PE alignment `0x1000`, `/Brepro` |
+| `0010` | host tests for BootShim and the handoff guard |
+
+`0007`–`0010` apply cleanly, in order, to a fresh `Firef1yfly/Mu-Silicium` checkout.
 
 ## Bring-up order
 
-1. Verify official onyx DTS against the selected SKU and stock/live DT; establish RAM and reservation evidence.
-2. Implement and validate the complete SM8735 shared profile and its source pins.
-3. Review the existing onyx Mu-Silicium integration and handoff against the same hardware inputs.
-4. Resolve sources, compile ADT, build kernel/package/firmware/payload, and validate image format.
-5. Only then test firmware, loader, kernel and root separately on the device with recovery available.
+1. Keep the device on `fastboot boot` only; never `fastboot flash`.
+2. Boot the menu-only image and confirm the firmware runs at all (the USB link must
+   drop; staying on `18d1:d00d` means the ABL never jumped).
+3. Reach an interactive UniXNU menu and export one Advanced Logger QR log.
+4. Only then qualify the firmware device tree, the payload volume size and the
+   kernel path.
 
-Common references: [porting](https://unixnu.com/porting/), [SoC support](https://unixnu.com/porting/soc-support), [device repository](https://unixnu.com/porting/device-repository), [bring-up](https://unixnu.com/porting/bring-up).
+The first milestone is complete when the same image hash cold-boots to an
+interactive menu three consecutive times with a log saved for each run.
+
+Common references: [porting](https://unixnu.com/porting/), [UEFI firmware](https://unixnu.com/porting/uefi-firmware),
+[device repository](https://unixnu.com/porting/device-repository), [bring-up](https://unixnu.com/porting/bring-up).
