@@ -40,6 +40,12 @@ place in this module that starts a process — re-checks every argv:
 write cannot be expressed here — not even accidentally by a future edit that
 does not go out of its way to remove the check.
 
+`attach` issues no device command at all: it only appends hash-bound panel
+photographs to a record that `boot` already wrote, one label per photograph, and
+never rewrites that record's verdict, image hash or hash confirmation. The panel
+is where the stages the host cannot see are recorded, so a frame that is not
+typed, hashed and labelled is not evidence.
+
 Evidence classes
 ----------------
 A record this script writes from a real run is an on-device observation. The
@@ -921,6 +927,78 @@ def write_record(record: dict, directory: Path) -> Path:
 
 
 # --------------------------------------------------------------------------
+# Panel evidence
+# --------------------------------------------------------------------------
+
+# Only container magic that a camera or `adb exec-out screencap` produces. The
+# point is to refuse "whatever file was in the wrong argument slot", not to
+# validate image contents.
+PANEL_SIGNATURES = (
+    (b"\x89PNG\r\n\x1a\n", "png"),
+    (b"\xff\xd8\xff", "jpeg"),
+    (b"GIF87a", "gif"),
+    (b"GIF89a", "gif"),
+)
+
+
+def panel_format(head: bytes) -> str | None:
+    for signature, name in PANEL_SIGNATURES:
+        if head.startswith(signature):
+            return name
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "webp"
+    return None
+
+
+def describe_panel_file(path: Path) -> dict:
+    path = Path(path)
+    if not path.is_file():
+        raise Refusal("panel_file_missing", f"no regular file at {path}", path=str(path))
+    with path.open("rb") as handle:
+        head = handle.read(16)
+    kind = panel_format(head)
+    if kind is None:
+        raise Refusal(
+            "panel_file_not_an_image",
+            f"{path.name} is not a PNG/JPEG/GIF/WebP; panel evidence is a photograph of the "
+            "screen, and an untyped file cannot be attributed to a frame",
+            path=str(path),
+        )
+    return {"path": str(path.resolve()), "bytes": path.stat().st_size,
+            "sha256": sha256_file(path), "format": kind}
+
+
+def pair_notes(photos: list[Path], notes: list[str]) -> list[str]:
+    """One label per photograph: either a single note for all, or one each."""
+    if not photos:
+        raise Refusal("no_panel_evidence", "attach needs at least one --photo")
+    if len(notes) == 1:
+        return list(notes) * len(photos)
+    if len(notes) != len(photos):
+        raise Refusal(
+            "panel_note_count_mismatch",
+            f"{len(photos)} --photo but {len(notes)} --note; give one note per photo or a "
+            "single note that covers all of them",
+            photos=len(photos),
+            notes=len(notes),
+        )
+    return list(notes)
+
+
+def recheck_image(record: dict) -> dict:
+    """Re-hash the image a record was made against, if it is still on disk."""
+    image = record.get("image") or {}
+    path, expected = image.get("path"), image.get("sha256")
+    if not path or not expected:
+        return {"state": "unrecorded"}
+    if not Path(path).is_file():
+        return {"state": "image_gone", "path": path, "expected_sha256": expected}
+    actual = sha256_file(Path(path))
+    return {"state": "match" if actual == expected else "MISMATCH",
+            "path": path, "expected_sha256": expected, "actual_sha256": actual}
+
+
+# --------------------------------------------------------------------------
 # Commands
 # --------------------------------------------------------------------------
 
@@ -963,6 +1041,72 @@ def run_probe(args) -> int:
     }
     print(json.dumps(report, sort_keys=True, ensure_ascii=False))
     return EXIT_POSITIVE if device_present else EXIT_NOT_PROVEN
+
+
+def run_attach(args) -> int:
+    """Bind panel photographs to an existing record; never a device command."""
+    path = args.record.expanduser()
+    if not path.is_file():
+        raise Refusal("record_missing", f"no ladder record at {path}", path=str(path))
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise Refusal("record_unreadable", f"{path} is not a JSON record: {error}",
+                      path=str(path)) from error
+    if record.get("schema_version") != 1 or record.get("record_kind") != "on_device_attempt":
+        raise Refusal(
+            "record_kind_unsupported",
+            "panel evidence attaches only to a schema_version 1 on_device_attempt record; "
+            f"{path.name} says schema_version={record.get('schema_version')!r} "
+            f"record_kind={record.get('record_kind')!r}",
+            path=str(path),
+        )
+
+    photos = [Path(item).expanduser() for item in args.photo]
+    notes = list(args.note)
+    labels = pair_notes(photos, notes)
+    described = [describe_panel_file(item) for item in photos]
+    recheck = recheck_image(record)
+    attached_at = utc_now()
+
+    evidence = record.setdefault("panel_evidence", [])
+    for item, label in zip(described, labels):
+        evidence.append({
+            "attached_at": attached_at,
+            "note": label,
+            "observer": args.observer,
+            "image_sha256": (record.get("image") or {}).get("sha256"),
+            "image_sha256_recheck": recheck["state"],
+            **item,
+        })
+    record["panel_evidence_recheck"] = {"utc": attached_at, **recheck}
+
+    notes_log = record.setdefault("panel_notes", [])
+    for label in labels:
+        if label not in notes_log:
+            notes_log.append(label)
+
+    path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    report = {
+        "record": str(path),
+        "record_kind": record["record_kind"],
+        "image_sha256": (record.get("image") or {}).get("sha256"),
+        "verdict": record.get("verdict"),
+        "verdict_changed": False,
+        "panel_evidence_count": len(evidence),
+        "attached": [{"path": item["path"], "sha256": item["sha256"], "note": label}
+                     for item, label in zip(described, labels)],
+        "image_sha256_recheck": recheck,
+    }
+    print(json.dumps(report, sort_keys=True, ensure_ascii=False))
+    if recheck["state"] == "MISMATCH":
+        print(
+            "WARNING: the image file no longer hashes to the value the record was made "
+            "against; the photographs are now bound to a record whose artefact moved.",
+            file=sys.stderr,
+        )
+        return EXIT_NOT_PROVEN
+    return EXIT_POSITIVE
 
 
 def run_boot(args, argv=None) -> int:
@@ -1209,6 +1353,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="print the audited device-command allowlist and exit",
         description="Print exactly which device commands this harness can issue, for audit.",
     )
+
+    attach = subparsers.add_parser(
+        "attach",
+        help="bind panel photographs to an existing record; issues no device command",
+        description="Append hash-bound panel evidence (screenshots or photographs of the debug "
+                    "console) to a ladder record, one label per photograph. The boot verdict is "
+                    "never rewritten: this adds what the host cannot see, it does not score it.",
+    )
+    attach.add_argument("--record", type=Path, required=True,
+                        help="the ladder-<UTC>.json written by `boot`")
+    attach.add_argument("--photo", type=Path, action="append", required=True,
+                        help="PNG/JPEG/GIF/WebP of the panel; repeat for each frame")
+    attach.add_argument("--note", action="append", required=True,
+                        help="what the frame shows; repeat once per photo, or once for all")
+    attach.add_argument("--observer", default="", help="who captured the frame (free text)")
     return parser
 
 
@@ -1227,6 +1386,8 @@ def main(argv=None) -> int:
             return run_probe(args)
         if args.command == "boot":
             return run_boot(args, argv)
+        if args.command == "attach":
+            return run_attach(args)
         return run_safety(args)
     except Refusal as refusal:
         print(json.dumps(refusal.as_dict(), sort_keys=True, ensure_ascii=False))

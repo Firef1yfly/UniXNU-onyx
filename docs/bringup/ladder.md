@@ -57,8 +57,31 @@ come back, so the attempt is bound to a freshly re-initialised bootloader. Witho
 that flag the record says so, and a `load_error` can only be attributed to
 "this bootloader state", not to the image.
 
-`probe` is read-only and issues no `boot`. `safety` issues no device command at
-all.
+`probe` is read-only and issues no `boot`. `safety` and `attach` issue no device
+command at all.
+
+### Binding the panel to the same record
+
+The stages the host cannot see - BDS starting `UniXNU.efi`, the menu appearing,
+keys working, the payload volume being listed - are read from the panel, so a
+photograph has to be bound to the attempt that produced it or it is a picture of
+an unnamed image:
+
+```sh
+python3 scripts/device-ladder.py attach \
+  --record docs/bringup/ladder-20261129T013000Z.json \
+  --photo ~/shots/page1-dxe-start.png --photo ~/shots/page3-last-before-grey.png \
+  --note "the DXE dispatch log, ending on ConSplitterDxe" \
+  --note "the last frame before the panel goes featureless grey" \
+  --observer "device owner"
+```
+
+`attach` requires one label per photograph (or a single label that covers all of
+them), refuses anything that is not a PNG/JPEG/GIF/WebP, stores each file's size
+and SHA-256, and re-hashes the image the record was made against: `match`,
+`image_gone` or `MISMATCH`, in which case it says so and exits non-zero. It never
+rewrites the record's verdict, its image hash or its hash confirmation - the
+panel cannot upgrade a verdict, only fill in what the host could not observe.
 
 ## Reading the verdict
 
@@ -101,8 +124,8 @@ when **the same SHA-256** cold-boots to an interactive UniXNU menu three times
 with a saved log each time (阶段 2.6 step 3-5: BDS starts `UniXNU.efi`, the menu
 is visible and accepts input, and the payload volume is listed). Steps 3-5 are
 read from the panel and the QR log export, because the host-side harness cannot
-see them; their observations belong in the same record's `warnings`/`anomalies`
-by hand, or in a follow-up note that names the same image hash.
+see them; their frames belong in the same record through `attach`, so the
+observation and the artefact hash it describes cannot drift apart.
 
 The harness's own unit tests are mocked host-side evidence: `tests/test_device_ladder.py`
 drives stub `fastboot`/`adb` binaries in a temporary directory and proves the

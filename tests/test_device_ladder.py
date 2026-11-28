@@ -508,6 +508,109 @@ class ProbeTests(LadderCase):
         self.assertEqual(report["getvar"], {})
 
 
+class AttachTests(LadderCase):
+    """Panel evidence is bound to a record; the boot verdict is never rewritten."""
+
+    PNG = b"\x89PNG\r\n\x1a\n" + b"panel-frame-fixture"
+
+    def record(self, *, image_sha256=None, schema_version=1, record_kind="on_device_attempt"):
+        path = self.records / "ladder-20261129T020000Z.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "schema_version": schema_version,
+            "record_kind": record_kind,
+            "generated_at": "2026-11-29T02:00:00.000000Z",
+            "image": {"path": str(self.image), "sha256": image_sha256 or self.sha256,
+                      "bytes": self.image.stat().st_size},
+            "verdict": {"verdict": "disconnected_after_boot", "positive": True},
+            "warnings": [],
+        }, indent=2, sort_keys=True) + "\n")
+        return path
+
+    def photo(self, name="page1.png", body=None):
+        path = self.tmp / name
+        path.write_bytes(self.PNG if body is None else body)
+        return path
+
+    def attach(self, record, *extra):
+        return self.run_ladder("attach", "--record", str(record), *extra)
+
+    def test_attach_binds_a_photo_without_touching_the_verdict(self):
+        record = self.record()
+        before = json.loads(record.read_text())
+        code, stdout, _ = self.attach(record, "--photo", str(self.photo()),
+                                      "--note", "the DXE dispatch log reached ConSplitterDxe")
+        self.assertEqual(code, LADDER.EXIT_POSITIVE)
+        after = json.loads(record.read_text())
+        self.assertEqual(after["verdict"], before["verdict"])
+        self.assertEqual(after["image"], before["image"])
+        entry, = after["panel_evidence"]
+        self.assertEqual(entry["sha256"], LADDER.sha256_file(self.photo()))
+        self.assertEqual(entry["format"], "png")
+        self.assertEqual(entry["note"], "the DXE dispatch log reached ConSplitterDxe")
+        self.assertEqual(entry["image_sha256"], self.sha256)
+        self.assertEqual(entry["image_sha256_recheck"], "match")
+        self.assertEqual(after["panel_evidence_recheck"]["state"], "match")
+        self.assertFalse(json.loads(stdout)["verdict_changed"])
+
+    def test_attach_refuses_a_file_that_is_not_a_panel_frame(self):
+        record = self.record()
+        before = record.read_text()
+        text = self.tmp / "notes.txt"
+        text.write_text("not a photograph\n")
+        code, stdout, _ = self.attach(record, "--photo", str(text), "--note", "wrong slot")
+        self.assertEqual(code, LADDER.EXIT_REFUSED)
+        self.assertEqual(json.loads(stdout)["code"], "panel_file_not_an_image")
+        self.assertEqual(record.read_text(), before, "a refusal must not edit the record")
+
+    def test_attach_refuses_a_note_count_that_cannot_pair_up(self):
+        record = self.record()
+        before = record.read_text()
+        second = self.photo("page2.png")
+        code, stdout, _ = self.attach(record, "--photo", str(self.photo()),
+                                      "--photo", str(second),
+                                      "--note", "first frame", "--note", "second frame",
+                                      "--note", "a third label for two frames")
+        self.assertEqual(code, LADDER.EXIT_REFUSED)
+        self.assertEqual(json.loads(stdout)["code"], "panel_note_count_mismatch")
+        self.assertEqual(record.read_text(), before)
+
+    def test_one_note_may_label_every_frame(self):
+        record = self.record()
+        code, stdout, _ = self.attach(record, "--photo", str(self.photo()),
+                                      "--photo", str(self.photo("page2.png")),
+                                      "--note", "the same grey frame, twice")
+        self.assertEqual(code, LADDER.EXIT_POSITIVE)
+        notes = [item["note"] for item in json.loads(record.read_text())["panel_evidence"]]
+        self.assertEqual(notes, ["the same grey frame, twice"] * 2)
+        self.assertEqual(json.loads(stdout)["panel_evidence_count"], 2)
+
+    def test_attach_reports_a_moved_image_and_still_refuses_to_score_it(self):
+        record = self.record(image_sha256="0" * 64)
+        code, stdout, stderr = self.attach(record, "--photo", str(self.photo()),
+                                           "--note", "captured after the app returned")
+        self.assertEqual(code, LADDER.EXIT_NOT_PROVEN)
+        self.assertIn("no longer hashes", stderr)
+        report = json.loads(stdout)
+        self.assertEqual(report["image_sha256_recheck"]["state"], "MISMATCH")
+        after = json.loads(record.read_text())
+        self.assertEqual(after["image"]["sha256"], "0" * 64,
+                         "attach must not rewrite the hash the attempt was bound to")
+        self.assertFalse(report["verdict_changed"])
+
+    def test_attach_refuses_a_record_of_another_kind(self):
+        record = self.record(schema_version=2)
+        before = record.read_text()
+        code, _, _ = self.attach(record, "--photo", str(self.photo()), "--note", "x")
+        self.assertEqual(code, LADDER.EXIT_REFUSED)
+        self.assertEqual(record.read_text(), before)
+
+    def test_attach_issues_no_device_command(self):
+        record = self.record()
+        self.attach(record, "--photo", str(self.photo()), "--note", "panel frame")
+        self.assertEqual(self.fastboot_calls(), [])
+
+
 class SafetyBoundaryTests(unittest.TestCase):
     def test_allowlist_templates_satisfy_the_boundary(self):
         LADDER.assert_safety_boundary()  # raises AssertionError on drift
