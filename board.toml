@@ -41,6 +41,13 @@ packages = [
   "{edk2}",
 ]
 
+# Runs before the EDK II build. Refuses a firmware checkout that is not at the
+# endpoint of patches/uefi/ (every file's blob is recorded by the series), a
+# board configuration whose size/base/compression disagree with board.toml, or an
+# FDF/DSC that lost a module this port already paid for. Skipped, with a message,
+# when no firmware checkout is named: `unixnu package --check` runs it without one.
+preflight = ["scripts/check-firmware-inputs.py"]
+
 [bootimg]
 # Firmware boot DTB selection is unresolved; never use the minimal ADT hardware DTS here.
 
