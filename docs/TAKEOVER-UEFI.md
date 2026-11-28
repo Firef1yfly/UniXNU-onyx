@@ -276,6 +276,21 @@ For the next attempt the platform debug level is restricted to errors
 That is a diagnostic setting only and must be restored before the port is
 considered usable.
 
+### The panel is 1440x3200, not 1280x2772
+
+The platform PCDs carried `1280x2772`, which is not this board. The live device
+tree gives the panel geometry directly:
+
+```
+qcom,mdss-dsi-panel-width  = <0x5a0>   /* 1440 */
+qcom,mdss-dsi-panel-height = <0xc80>   /* 3200 */
+```
+
+with the contiguous splash region at `0xfc800000` sized `0x02b00000`, matching
+`Display_Reserved` in the board memory map. With a wrong resolution every write
+uses the wrong stride, so the firmware can draw and still show nothing — which is
+exactly the grey panel observed while the device clearly kept running.
+
 ### Consequences for the port
 
 - Any onyx image built by the stock packer without the `text_offset` adjustment
