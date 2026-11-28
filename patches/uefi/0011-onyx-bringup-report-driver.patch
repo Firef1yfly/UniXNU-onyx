@@ -1,9 +1,9 @@
 diff --git a/Platforms/Xiaomi/onyxPkg/Drivers/OnyxBringupReportDxe/OnyxBringupReportDxe.c b/Platforms/Xiaomi/onyxPkg/Drivers/OnyxBringupReportDxe/OnyxBringupReportDxe.c
 new file mode 100644
-index 0000000..98d944a
+index 0000000..dc4c59c
 --- /dev/null
 +++ b/Platforms/Xiaomi/onyxPkg/Drivers/OnyxBringupReportDxe/OnyxBringupReportDxe.c
-@@ -0,0 +1,156 @@
+@@ -0,0 +1,163 @@
 +/** @file
 +  Bring-up report: print the boot-option state that decides what BDS boots.
 +
@@ -155,8 +155,15 @@ index 0000000..98d944a
 +{
 +  DEBUG ((DEBUG_ERROR, "\nONYX: === bring-up report ===\n"));
 +  ReportEnvironment ();
-+  DEBUG ((DEBUG_ERROR, "ONYX: === halting; power cycle to continue ===\n"));
++  DEBUG ((DEBUG_ERROR, "ONYX: === bring-up report reached the end ===\n"));
 +
++  //
++  // Signal without the display: this build powers the board off. A device that
++  // stays dark instead of returning to Android proves the driver executed, which
++  // a grey panel cannot show.
++  //
++  gBS->Stall (3 * 1000 * 1000);
++  gRT->ResetSystem (EfiResetShutdown, EFI_SUCCESS, 0, NULL);
 +  CpuDeadLoop ();
 +  return EFI_SUCCESS;
 +}
