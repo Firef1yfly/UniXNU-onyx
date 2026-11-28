@@ -1,19 +1,19 @@
 diff --git a/Platforms/Xiaomi/onyxPkg/Drivers/OnyxBringupReportDxe/OnyxBringupReportDxe.c b/Platforms/Xiaomi/onyxPkg/Drivers/OnyxBringupReportDxe/OnyxBringupReportDxe.c
 new file mode 100644
-index 0000000..390fb21
+index 0000000..1f35933
 --- /dev/null
 +++ b/Platforms/Xiaomi/onyxPkg/Drivers/OnyxBringupReportDxe/OnyxBringupReportDxe.c
-@@ -0,0 +1,172 @@
+@@ -0,0 +1,165 @@
 +/** @file
-+  Bring-up report: paint checkpoints straight into the GOP framebuffer.
++  Bring-up report: why does BDS find nothing to boot?
 +
-+  ConOut is not reliable this early on onyx — a driver that clears the screen and
-+  then prints can leave a blank panel with no way to tell text rendering from a
-+  hang. This driver therefore writes pixels itself: a background colour encodes
-+  the furthest checkpoint reached, and one bar per checkpoint confirms the count.
-+  It needs no font, no console binding and no delay in the boot path.
++  The console is usable in DXE (BDS itself prints to it), but a driver that runs
++  before GraphicsConsole binds sees the null console and prints into nothing.
++  This driver therefore connects controllers until ConOut reports a real mode,
++  prints the boot-option state that decides whether BDS boots UniXNU, and halts
++  so the text stays on screen.
 +
-+  Diagnostic build only; it halts so the pattern can be read.
++  Diagnostic build only.
 +
 +  Copyright (c) 2026, UniXNU contributors. All rights reserved.
 +  SPDX-License-Identifier: BSD-2-Clause-Patent
@@ -21,11 +21,16 @@ index 0000000..390fb21
 +
 +#include <Uefi.h>
 +
++#include <Guid/GlobalVariable.h>
 +#include <Library/BaseLib.h>
 +#include <Library/DebugLib.h>
 +#include <Library/HobLib.h>
++#include <Library/PrintLib.h>
 +#include <Library/MemoryAllocationLib.h>
 +#include <Library/UefiBootServicesTableLib.h>
++#include <Library/UefiLib.h>
++#include <Library/UefiRuntimeServicesTableLib.h>
++#include <Protocol/FirmwareVolume2.h>
 +#include <Protocol/GraphicsOutput.h>
 +
 +STATIC CONST EFI_GUID  mEntryArgHobGuid = {
@@ -33,62 +38,113 @@ index 0000000..390fb21
 +};
 +
 +//
-+// Checkpoint colours. The background is the furthest checkpoint reached; the
-+// bars repeat the count so a single ambiguous colour cannot be misread.
++// Connect every controller once per round until the console has a real mode.
 +//
-+#define ONYX_STAGE_GOP        1
-+#define ONYX_STAGE_HOB        2
-+#define ONYX_STAGE_MAP        3
-+#define ONYX_STAGE_HALTED     4
-+
 +STATIC
-+UINT32
-+StageColor (
-+  IN UINTN  Stage
++BOOLEAN
++WaitForConsole (
++  VOID
 +  )
 +{
-+  switch (Stage) {
-+    case ONYX_STAGE_GOP:    return 0x00FF8000; // orange: driver ran, GOP usable
-+    case ONYX_STAGE_HOB:    return 0x0000FF00; // green : handoff HOB present
-+    case ONYX_STAGE_MAP:    return 0x0000FFFF; // cyan  : memory map readable
-+    default:                return 0x00FFFFFF; // white : past every checkpoint
++  EFI_STATUS  Status;
++  EFI_HANDLE  *Handles;
++  UINTN       Count;
++  UINTN       Index;
++  UINTN       Round;
++
++  for (Round = 0; Round < 50; Round++) {
++    if ((gST->ConOut != NULL) && (gST->ConOut->Mode != NULL) && (gST->ConOut->Mode->Mode >= 0)) {
++      return TRUE;
++    }
++
++    Status = gBS->LocateHandleBuffer (ByProtocol, NULL, NULL, &Count, &Handles);
++    if (!EFI_ERROR (Status)) {
++      for (Index = 0; Index < Count; Index++) {
++        gBS->ConnectController (Handles[Index], NULL, NULL, TRUE);
++      }
++
++      FreePool (Handles);
++    }
++
++    gBS->Stall (100000);
++  }
++
++  return (gST->ConOut != NULL) && (gST->ConOut->Mode != NULL) && (gST->ConOut->Mode->Mode >= 0);
++}
++
++STATIC
++VOID
++ReportBootOptions (
++  VOID
++  )
++{
++  EFI_STATUS  Status;
++  UINT16      *Order;
++  UINTN       OrderSize;
++  UINTN       Index;
++  CHAR16      Name[9];
++  VOID        *Value;
++  UINTN       ValueSize;
++
++  Order     = NULL;
++  OrderSize = 0;
++  Status    = gRT->GetVariable (L"BootOrder", &gEfiGlobalVariableGuid, NULL, &OrderSize, NULL);
++  if (Status == EFI_BUFFER_TOO_SMALL) {
++    Order = AllocatePool (OrderSize);
++    if (Order != NULL) {
++      Status = gRT->GetVariable (L"BootOrder", &gEfiGlobalVariableGuid, NULL, &OrderSize, Order);
++    }
++  }
++
++  if (EFI_ERROR (Status) || (Order == NULL)) {
++    Print (L"  BootOrder: unavailable (%r)\r\n", Status);
++  } else {
++    Print (L"  BootOrder: %u entries\r\n", (UINT32)(OrderSize / sizeof (UINT16)));
++    for (Index = 0; Index < OrderSize / sizeof (UINT16); Index++) {
++      UnicodeSPrint (Name, sizeof (Name), L"Boot%04x", Order[Index]);
++      Value     = NULL;
++      ValueSize = 0;
++      Status    = gRT->GetVariable (Name, &gEfiGlobalVariableGuid, NULL, &ValueSize, NULL);
++      if (Status == EFI_BUFFER_TOO_SMALL) {
++        Value = AllocatePool (ValueSize);
++        if (Value != NULL) {
++          Status = gRT->GetVariable (Name, &gEfiGlobalVariableGuid, NULL, &ValueSize, Value);
++        }
++      }
++
++      Print (L"    %s: %u bytes, %r\r\n", Name, (UINT32)ValueSize, Status);
++      if (Value != NULL) {
++        FreePool (Value);
++      }
++    }
++
++    FreePool (Order);
 +  }
 +}
 +
 +STATIC
 +VOID
-+Fill (
-+  IN EFI_GRAPHICS_OUTPUT_PROTOCOL  *Gop,
-+  IN UINTN                         X,
-+  IN UINTN                         Y,
-+  IN UINTN                         Width,
-+  IN UINTN                         Height,
-+  IN UINT32                        Color
++ReportEnvironment (
++  VOID
 +  )
 +{
-+  EFI_GRAPHICS_OUTPUT_BLT_PIXEL  Pixel;
-+  EFI_STATUS                     Status;
++  EFI_STATUS  Status;
++  EFI_HANDLE  *Handles;
++  UINTN       Count;
++  VOID        *Hob;
 +
-+  Pixel.Blue  = (UINT8)(Color & 0xFF);
-+  Pixel.Green = (UINT8)((Color >> 8) & 0xFF);
-+  Pixel.Red   = (UINT8)((Color >> 16) & 0xFF);
-+  Pixel.Reserved = 0;
++  Hob = GetFirstGuidHob (&mEntryArgHobGuid);
++  Print (L"  handoff HOB: %s\r\n", (Hob == NULL) ? L"absent" : L"present");
 +
-+  Status = Gop->Blt (
-+                  Gop,
-+                  &Pixel,
-+                  EfiBltVideoFill,
-+                  0,
-+                  0,
-+                  X,
-+                  Y,
-+                  Width,
-+                  Height,
-+                  0
-+                  );
++  Status = gBS->LocateHandleBuffer (ByProtocol, &gEfiFirmwareVolume2ProtocolGuid, NULL, &Count, &Handles);
 +  if (EFI_ERROR (Status)) {
-+    DEBUG ((DEBUG_ERROR, "ONYX: Blt fill failed: %r\n", Status));
++    Print (L"  firmware volumes: %r\r\n", Status);
++  } else {
++    Print (L"  firmware volumes: %u\r\n", (UINT32)Count);
++    FreePool (Handles);
 +  }
++
++  ReportBootOptions ();
 +}
 +
 +EFI_STATUS
@@ -98,92 +154,29 @@ index 0000000..390fb21
 +  IN EFI_SYSTEM_TABLE  *SystemTable
 +  )
 +{
-+  EFI_STATUS                    Status;
-+  EFI_GRAPHICS_OUTPUT_PROTOCOL  *Gop;
-+  UINTN                         Stage;
-+  UINTN                         Width;
-+  UINTN                         Height;
-+  UINTN                         Index;
-+  UINTN                         BarWidth;
-+  UINTN                         BarGap;
-+  VOID                          *Handoff;
-+
-+  Status = gBS->LocateProtocol (&gEfiGraphicsOutputProtocolGuid, NULL, (VOID **)&Gop);
-+  if (EFI_ERROR (Status) || (Gop == NULL) || (Gop->Mode == NULL) || (Gop->Mode->Info == NULL)) {
-+    // Nothing can be drawn; leaving the panel alone keeps this case distinguishable
-+    // from a painted one.
-+    CpuDeadLoop ();
-+    return EFI_SUCCESS;
++  if (WaitForConsole ()) {
++    gST->ConOut->ClearScreen (gST->ConOut);
 +  }
 +
-+  Stage  = ONYX_STAGE_GOP;
-+  Width  = Gop->Mode->Info->HorizontalResolution;
-+  Height = Gop->Mode->Info->VerticalResolution;
++  Print (L"\r\n=== onyx bring-up report ===\r\n");
++  Print (L"console mode %d, %ux%u\r\n",
++         (INT32)gST->ConOut->Mode->Mode,
++         (UINT32)gST->ConOut->Mode->CursorColumn,
++         (UINT32)gST->ConOut->Mode->CursorRow);
++  ReportEnvironment ();
++  Print (L"=== halting; power cycle to continue ===\r\n");
 +
-+  Handoff = GetFirstGuidHob (&mEntryArgHobGuid);
-+  if (Handoff != NULL) {
-+    Stage = ONYX_STAGE_HOB;
-+  }
-+
-+  //
-+  // A successful GetMemoryMap proves the DXE core is fully live, which the HOB
-+  // lookup alone does not.
-+  //
-+  {
-+    UINTN                      Size = 0;
-+    UINTN                      Key;
-+    UINTN                      DescriptorSize;
-+    UINT32                     Version;
-+    EFI_MEMORY_DESCRIPTOR      *Map;
-+    EFI_STATUS                 MapStatus;
-+
-+    MapStatus = gBS->GetMemoryMap (&Size, NULL, &Key, &DescriptorSize, &Version);
-+    if (MapStatus == EFI_BUFFER_TOO_SMALL) {
-+      Size += DescriptorSize * 4;
-+      Map   = AllocatePool (Size);
-+      if ((Map != NULL) &&
-+          !EFI_ERROR (gBS->GetMemoryMap (&Size, Map, &Key, &DescriptorSize, &Version)))
-+      {
-+        Stage = ONYX_STAGE_MAP;
-+      }
-+
-+      if (Map != NULL) {
-+        FreePool (Map);
-+      }
-+    }
-+  }
-+
-+  Fill (Gop, 0, 0, Width, Height, StageColor (Stage));
-+
-+  //
-+  // One bar per checkpoint: width is a tenth of the panel, counted from the top
-+  // left so the bar count is readable even at an angle.
-+  //
-+  BarWidth = Width / 12;
-+  BarGap   = BarWidth / 2;
-+  for (Index = 0; Index < Stage; Index++) {
-+    Fill (
-+      Gop,
-+      Index * (BarWidth + BarGap) + BarGap,
-+      BarGap,
-+      BarWidth,
-+      Height / 4,
-+      0x00000000
-+      );
-+  }
-+
-+  DEBUG ((DEBUG_INFO, "ONYX: bring-up stage %Lu reached\n", (UINT64)Stage));
 +  CpuDeadLoop ();
 +  return EFI_SUCCESS;
 +}
 diff --git a/Platforms/Xiaomi/onyxPkg/Drivers/OnyxBringupReportDxe/OnyxBringupReportDxe.inf b/Platforms/Xiaomi/onyxPkg/Drivers/OnyxBringupReportDxe/OnyxBringupReportDxe.inf
 new file mode 100644
-index 0000000..0ecc27f
+index 0000000..37f54c6
 --- /dev/null
 +++ b/Platforms/Xiaomi/onyxPkg/Drivers/OnyxBringupReportDxe/OnyxBringupReportDxe.inf
-@@ -0,0 +1,36 @@
+@@ -0,0 +1,40 @@
 +## @file
-+#  Bring-up report driver: prints DXE checkpoints to the graphical console.
++#  Bring-up report driver: prints the boot-option state BDS will act on.
 +#
 +#  Copyright (c) 2026, UniXNU contributors. All rights reserved.
 +#  SPDX-License-Identifier: BSD-2-Clause-Patent
@@ -207,14 +200,18 @@ index 0000000..0ecc27f
 +[LibraryClasses]
 +  UefiDriverEntryPoint
 +  UefiLib
++  UefiRuntimeServicesTableLib
 +  DebugLib
 +  BaseLib
-+  BaseMemoryLib
 +  MemoryAllocationLib
 +  HobLib
++  PrintLib
++
++[Guids]
++  gEfiGlobalVariableGuid
 +
 +[Protocols]
-+  gEfiGraphicsOutputProtocolGuid
++  gEfiFirmwareVolume2ProtocolGuid
 +
 +[Depex]
-+  gEfiGraphicsOutputProtocolGuid
++  TRUE

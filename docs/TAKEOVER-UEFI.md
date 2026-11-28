@@ -276,7 +276,7 @@ For the next attempt the platform debug level is restricted to errors
 That is a diagnostic setting only and must be restored before the port is
 considered usable.
 
-### The panel is 1440x3200, not 1280x2772
+### Framebuffer geometry: the panel size is the wrong answer
 
 The platform PCDs carried `1280x2772`, which is not this board. The live device
 tree gives the panel geometry directly:
@@ -287,9 +287,22 @@ qcom,mdss-dsi-panel-height = <0xc80>   /* 3200 */
 ```
 
 with the contiguous splash region at `0xfc800000` sized `0x02b00000`, matching
-`Display_Reserved` in the board memory map. With a wrong resolution every write
-uses the wrong stride, so the firmware can draw and still show nothing — which is
-exactly the grey panel observed while the device clearly kept running.
+`Display_Reserved` in the board memory map. Setting the PCDs to those values made
+DXE text render as scrambled glyphs, while `1280x2772` renders readable text, so
+the panel geometry is not the geometry of the framebuffer the loader hands over.
+`1280x2772` is restored and the mismatch is recorded rather than solved: the real
+framebuffer mode still has to be measured.
+
+### Image variants for the next device runs
+
+| Image | Contents | Expectation |
+| --- | --- | --- |
+| `onyx-menu-boot.img` | includes `OnyxBringupReportDxe` | paints a checkpoint colour and halts, so the stage is readable |
+| `onyx-menu-boot-nodiag.img` | same firmware without that driver | runs BDS to completion, so the menu or `No Operating System Found!` appears |
+
+Test the second one first once the panel geometry is correct: `Print` in
+`PlatformBootManagerUnableToBoot` is not DEBUG-gated, so either outcome is
+visible without any extra instrumentation.
 
 ### Consequences for the port
 
