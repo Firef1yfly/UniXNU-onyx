@@ -2,9 +2,11 @@
 
 English | [简体中文](README.zh-CN.md)
 
-**Experimental reconstruction. No successful UEFI boot is claimed yet** — the boot
-loader accepts the image but the firmware has not been observed running. Nothing
-has been flashed; every device test used `fastboot boot` only.
+**Experimental reconstruction. No successful UEFI boot is claimed yet** — firmware
+has been observed running deep into DXE dispatch on the device and then falling
+into the platform's unable-to-boot path (a grey frame), but no boot option, menu
+or OS has ever been reached. Nothing has been flashed; every device test used
+`fastboot boot` only.
 
 ## Current scope
 
@@ -23,8 +25,14 @@ has been flashed; every device test used `fastboot boot` only.
 ## Where the firmware stands
 
 A DEBUG CLANGPDB Mu-Silicium build succeeds and the resulting 3 MiB volume passes
-an offline, byte-level acceptance check. The boot loader accepts the image, but no
-firmware output has been observed yet. Read
+an offline, byte-level acceptance check. On the device the volume dispatches the
+whole DXE driver set — three screens of `DEBUG` text through the platform
+`SerialPortLib` are on record — and then stops with a grey frame, which the
+platform BDS paints when it gives up on its boot options
+(`PlatformBootManagerUnableToBoot`). The hand-off to the UniXNU application is now
+owned by `PlatformBootManagerAfterConsole()` through the platform's
+`DeviceBootManagerLib`, so BDS cannot reach that path while the application is
+present. None of this has reached a menu yet. Read
 [the takeover record](docs/TAKEOVER-UEFI.md) before changing anything here.
 
 ### The onyx boot loader adds `text_offset` to the jump address

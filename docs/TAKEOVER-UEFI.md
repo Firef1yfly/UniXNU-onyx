@@ -2,7 +2,7 @@
 
 ## Scope and revisions
 
-This work is an isolated device-repository worktree on branch `port/onyx-uefi-handoff`, based on `Firef1yfly/UniXNU-onyx` commit `9afe88a6ce3ffd42b24ef7a2d4ef04aedf393085`. It is a source baseline, not a validated build revision. The reviewed adjacent upstream source checkouts were UniXNU `fdf81eaa832ce5c850d3c53c698407aa722a4653` and Firef1yfly/Mu-Silicium `1d0f1e41018b2519ab9b41b60ac073453e346ba0`; those revisions are not evidence that the Onyx-specific diff in this worktree builds or boots.
+This record now lives in the device repository `/home/firefly/UniXNU-onyx` on branch `main`, tracking `origin/main` at `1d31324`. It began as an isolated worktree on branch `port/onyx-uefi-handoff` based on `Firef1yfly/UniXNU-onyx` commit `9afe88a6ce3ffd42b24ef7a2d4ef04aedf393085`; that worktree and branch name are history, not the current checkout. It is a source baseline, not a validated build revision. The reviewed adjacent upstream source checkouts were UniXNU `fdf81eaa832ce5c850d3c53c698407aa722a4653` and Firef1yfly/Mu-Silicium `1d0f1e41018b2519ab9b41b60ac073453e346ba0`; those revisions are not evidence that the Onyx-specific diff in this worktree builds or boots.
 
 The source changes in this branch have not been committed. Do not cite the base commit alone as containing or validating these changes. Keep firmware, memory, configuration, packaging, display, input and kernel status at `planned` until each required input and test is independently qualified.
 
@@ -40,6 +40,15 @@ A read-only `adb` capture on the rooted device recorded fingerprint
 `Redmi/onyx/onyx:17/CP2A.260605.016/OS4.0.4.0.XOLCNXM:user/release-keys`, slot
 `_a`, and `ro.boot.flash.locked=1` with `verifiedbootstate=green`.
 
+Those two adb values are disguised, and reading them as the lock state was an
+error corrected on 2026-11-28. Fastboot is authoritative on this device and
+reports `unlocked: yes` with `product: onyx` and `current-slot: a`, so the
+bootloader is unlocked; the runtime capture in `docs/RUNTIME-ANDROID17.md` also
+records `verified boot state: orange`, which is what an unlocked bootloader
+reports. The lock was never the blocker: images did execute on the device
+afterwards, with BootShim relocating the volume, SEC running and DXE output
+reaching the panel.
+
 `/chosen` on the live tree holds `linux,initrd-start = 0xb5921000` and
 `linux,initrd-end = 0xb7ffeb18`. That end is not sector aligned, which showed the
 first SEC validator was too strict; it now rounds up and requires the padded
@@ -47,9 +56,10 @@ range to stay inside the same reserved region. The padded end `0xb8000000` still
 fits the `Kernel` reservation, and no firmware reservation (`UEFI_FD`, stack,
 SEC/DXE heaps) overlaps the payload.
 
-The locked bootloader is a hard prerequisite, not a verification result. A
-locked state refuses `fastboot boot` of an unsigned image, so the acceptance
-ladder cannot start until Mi Unlock is completed with the stock archive in hand.
+A locked bootloader would be a hard prerequisite, but this one is not locked, so
+nothing in the acceptance ladder waits on Mi Unlock. What the ladder waits on is
+an observable channel and a hash-bound image, which is a different constraint and
+is why the bring-up report driver exists.
 
 ## Board-map cross-check
 
@@ -98,8 +108,13 @@ markers from `OnyxHandoff.c` and requires each to appear in the compact volume
 bytes, so a guard that is compiled out, optimised away or linked into the wrong
 volume fails acceptance instead of shipping silently.
 
-The current volume carries all 13 markers. This is a presence check only; it
-cannot show that the guard is reached at runtime.
+The volume of that round carried every marker. This is a presence check only; it
+cannot show that the guard is reached at runtime. It also has to be re-run on
+each build rather than trusted once: `OnyxHandoff.c` holds nineteen `ONYX:`
+literals and the checker requires sixteen of them, and a later build compiled
+the guard out entirely because the DSC lost its compile switch — the round
+recorded at the end of this document. A previous "all markers present" sentence
+in this document was true of its own build and false of the next one.
 
 ## Build determinism
 
@@ -123,11 +138,15 @@ re-verifies its own output.
 
 | Input | Value |
 | --- | --- |
-| Firmware volume | `ea2ff324...`, 3 MiB |
+| Firmware volume | 3 MiB, the build `ea2ff324...` of that round (superseded; the later builds are bound below) |
 | Appended device tree | the captured runtime FDT, SHA-256 `42dc9ca6...` (not the ADT DTS) |
 | Payload | 16 MiB FAT12 volume with `EFI/UniXNU/unixnu.toml` exposing a Tools entry |
 | Header | Android v4, `kernel_compression = none` |
-| Output | `out/onyx-menu-boot.img`, 20,779,008 bytes, SHA-256 `e0258873...` |
+| Output | `out/onyx-menu-boot.img`, 20,779,008 bytes |
+
+That image hash `e0258873...` no longer resolves anywhere in this workspace, so
+it is not cited further. The images that do exist are bound in the artefact note
+under the round recorded at the end of this document.
 
 The packer reported `shim_bytes = 224`, `ramdisk_bytes = 16777216` and
 `kernel_address = 0x0` (v4 has no load addresses).
@@ -157,8 +176,11 @@ two trials started from a clean `fastboot reboot-bootloader`.
 
 So `Booting OKAY` acknowledges the download, not execution. Verification ladder
 step 1 as written in the design ("bootloader accepts the header") is satisfied
-only in that transport sense, and step 2 cannot be reached by observing the
-device, because nothing of ours appears to run.
+only in that transport sense, and step 2 could not be reached by observing the
+device, because at that point nothing of ours appeared to run. That was the
+pre-`text_offset` state; the later runs in this document overturn it for the
+images that carry the corrected header, and it is kept here as the reason a
+`Booting OKAY` line alone is never counted as execution.
 
 The same file also produced both `Booting OKAY` and
 `Booting FAILED (remote: 'Failed to load/authenticate boot image: Load Error')`
@@ -338,7 +360,7 @@ Checked against the device repository specification
 | --- | --- |
 | `board.toml` format 2, `porting.toml` format 1, matching identity | done; record checker passes (13 areas) |
 | `feeds.toml`, `unixnu.lock`, `configs/`, `dts/`, `patches/xnu/series`, `package/` | present |
-| `proprietary-files.txt`, firmware patches, DSC/FDF integration | done, as `patches/uefi/0001`-`0011` |
+| `proprietary-files.txt`, firmware patches, DSC/FDF integration | done, as `patches/uefi/0001` and `0007`-`0013`; `0002` and `0003` were withdrawn and their surviving content folded into `0007`/`0009` |
 | `README.md`, `AGENTS.md` with scope, commands and guide links | done, in English and Chinese |
 | `.gitignore`, `local.toml.example` | done; local paths and generated output ignored |
 | `unixnu` GitHub topic | added and verified |
@@ -370,6 +392,14 @@ volume; the cause is dispatch order. With `Depex = TRUE` it dispatched at DXE co
 start, before the graphics and firmware-volume plumbing it reads, so its report was
 written into a framebuffer path that did not exist yet. The driver now depends on
 `gEfiGraphicsOutputProtocolGuid`.
+
+What is established for that driver is only this: it is present in the volume and,
+under the current depex, it dispatches after GOP is installed. Whether it reaches
+its halt on hardware is not established — the panel evidence is a grey frame that
+follows about three pages of `DEBUG` output, which is also what a driver that ran
+with a broken display path would look like. A later revision powers the board off
+after printing instead of halting, because staying dark is a display-independent
+signal; that revision is not established on hardware either.
 
 ## Hardware status and safety
 
@@ -405,3 +435,263 @@ Build inputs were independent of any pre-existing local tree: Mu_Basecore
 `8c4cdc43abf23cffdeb588621126253bb2c559da`, openssl
 `67b5686b4419b4cb8caa502711c41815f5279751`, LLVM/LLD 22.1.8, and
 `SOURCE_DATE_EPOCH` pinned to the Mu commit time.
+
+## Round recorded 2026-11-28 (host only): a silently disabled guard, a series that was not a stack, and a direct-start fallback
+
+No phone was attached during this round and no `adb` or `fastboot` command was
+run, so nothing below is a hardware result. BDS has still never been observed
+starting `UniXNU.efi`; the newest device observation remains the grey frame and
+reset consistent with `PlatformBootManagerUnableToBoot` recorded earlier in this
+document.
+
+### The handoff guard was compiled out and nothing failed loudly
+
+`onyx.dsc` had lost its `-DONYX_FDT_HANDOFF=1` switch, and `Sec.inf` adds
+`OnyxHandoff.c` only under that switch. The guard was therefore absent from the
+firmware volume while the source, the host tests and the record all still said it
+was there. This was measured on the last build in
+`Build/onyxPkg/DEBUG_CLANGPDB/FV/SILICIUM_UEFI.fd`: 3,145,728 bytes, SHA-256
+`be68806743b96a57ccf73a28cc75ad6565243ed0ec616d5d976f55e12f19531f`, in which
+`strings -a` finds zero occurrences of `ONYX:`, `ONYX-BOOT` and `OnyxHandoff`.
+
+`scripts/accept-firmware.py` refuses that volume, which is exactly what the marker
+check was added for:
+
+```
+ERROR: the SEC handoff guard is not compiled into the compact outer FV: ONYX: FDT address 0x; ONYX: FDT and initrd ranges overlap; ... ONYX: x0 = 0x
+```
+
+It names the sixteen `ONYX:` markers it extracts from `OnyxHandoff.c`; the source
+holds nineteen. The switch is restored in the live `onyx.dsc` (line 139) and
+patch `0009` carries it, so a rebuild has the guard back. `Sec.inf` had also been
+rewritten with LF endings while the tree uses CRLF, which produced a 69-line
+phantom diff that said nothing about the guard; the endings are restored.
+
+The lesson is worth stating plainly, because it is the failure mode this record
+exists to prevent: a compile switch that gates a guard is part of the artefact's
+identity, not a build convenience. Green host tests and a green source tree did
+not show the missing guard; parsing the actual FD did.
+
+Not every FD-path check is per-build, either. `tests/test_port_policy.py` reads
+the tracked `onyx.dsc`, so it would have caught the dropped switch, and
+`tests/test_accept_firmware.py` only exercises synthetic fixtures. The check that
+matters for a device attempt is the one run against the bytes about to be packed.
+
+### The patch series was not a cumulative stack
+
+`0001`, `0002` and `0007` all diffed the same baseline BootShim blob, and `0002`'s
+DSC/FDF hunks overlapped `0009`'s, so the earlier sentence in this document that
+`0007`-`0010` apply cleanly in order described parts of the series and not the
+series. It is now a real stack: `0001`, `0007`, `0008`, `0009`, `0010`, `0011`,
+`0012`, `0013`, each applying in order onto the pristine baseline and
+reproducing the live tree byte for byte.
+
+`0002` (QR/Advanced Logger diagnostic) and `0003` (BDS platform option) were
+withdrawn; their surviving wiring is folded into `0007` and `0009` and the folds
+are documented in those patch headers. The orphan `OnyxBootOptions` provider was
+not landed, because it still needs the application volume's device path — the
+exact thing that is missing when registration cannot be trusted.
+`tests/test_uefi_patch_series.py` pins the patch list and the blob-hash chain, so
+a patch that stops being cumulative fails on the host instead of during a build:
+thirteen tests, OK.
+
+The series is two-tree and cannot be validated from one checkout: `UniXNUPkg` is
+a symlink to the external UniXNU checkout
+(`Mu-Silicium/UniXNUPkg -> UniXNU/package/UniXNUPkg`), so a patch touching
+`UniXNUDxe.c` only applies when that checkout is present at the recorded
+revision. Both trees must therefore be recorded for any build that carries
+`0012`.
+
+### A direct-start fallback exists as a host-tested contingency only
+
+Patch `0012` leaves the `Boot####`/`BootOrder` registration as the primary path
+and adds one fallback that arms only when that path cannot be trusted: the
+application's firmware volume has no device path, or `gRT->SetVariable` fails for
+`Boot####`/`BootOrder`. It logs the armed reason on `EndOfDxe` (hooked to log
+only, because this platform signals `EndOfDxe` before it registers its own default
+options) and starts the application's PE32 section once, on `ReadyToBoot`, with
+`LoadImage(TRUE, gImageHandle, NULL, ...)` plus `StartImage`, under a run-once
+flag. Every decision prints `DEBUG` at error level under the prefix
+`ONYX-BOOT: `, including the case where nothing needed doing: `Boot%04x
+registered first in BootOrder, BDS starts it, fallback not armed`. That last
+marker matters, because it makes a successful registration visible instead of
+leaving an empty log ambiguous.
+
+Its limits are part of the record: it is not a second boot manager, it does not
+run when both variables were written, it requires the application and the driver
+to share a firmware volume, it changes nothing about image authentication, and it
+is unverified on hardware. `Tests/OnyxBootPath` covers it on the host — nine
+tests, OK, added by patch `0013`. The fallback has never fired on a device and
+none of its markers has ever been read from the panel, so it is a contingency,
+not an observed boot path.
+
+Correction (2026-11-29): the trigger is wrong. Mu_Basecore signals
+`gEfiEventReadyToBootGuid` only from `EfiBootManagerBoot()`
+(`MdeModulePkg/Library/UefiBootManagerLib/BmBoot.c`) and Silicium's
+`PlatformBootManagerLib` never signals it, so an armed fallback waits for an
+event that a boot with no startable option never raises — exactly the boot it was
+written for. Patch `0014` moves the hand-off to
+`DeviceBootManagerAfterConsole()`; the round recorded 2026-11-29 at the end of
+this document has the evidence and the artefact hashes. `0012` stays in the
+series because the registration and its markers are still what the driver does.
+
+### Artefact binding, and why two images with different hashes are not a contradiction
+
+Every pack rewrites `out/boot.json`, so that file binds only the pack that wrote
+it last and says nothing about the images written before it. The images were
+hashed in place on 2026-11-28:
+
+| Image (`/home/firefly/文档/onyx-porting/out/`) | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `onyx-menu-boot.img` | 20,779,008 | `69945aedf50538574c42f2be5505200513932e3dd2dd2dbd3feb3eb80cd5322c` |
+| `onyx-menu-boot-nodiag.img` | 20,779,008 | `6dfaadaa3a26660dea965d898cef3cae1fe22c57add494833792efb51264c383` |
+| `onyx-ab-noguard.img` | 20,779,008 | `28415a3f50587da4d9274852834f94520c01a072e847e5342ef96bade432fe15` |
+| `onyx-probe-shutdown.img` | 20,779,008 | `33160e5223713f323ee2602485718e5f73057b32e5a1daaa5812709c1ce2989d` |
+| `onyx-probe-coldboot.img` | 20,779,008 | `83e0c436b3e9cf52b5aa4dcc0fe5f2bf00b1f9ecc704737b637cb3871f2e1de7` |
+| `onyx-menu-spin.img` | 20,779,008 | `122797670433e3f0200cbf255455d5e98f73b8822879227a34d85b3c47f3c233` |
+| `onyx-probe-spin.img` | 4,001,792 | `bde2c053f7e2c5801301ac6db9558b9f69c2cb9248cea3a96eda644a29641ff4` |
+
+The latest pack (2026-11-29 00:38) is bound end to end: `out/boot.json` names
+`image_sha256 9809edcb0f9ce5df47e827666cfbda44342e40a287fe9a77e2f81bf83e5a1147`
+beside `fd_sha256 8b2d6b9ce58ea6f1c511774a22c4ebec6ca5fdcdf9612e492687fa6aa239d5b8`
+and `dtb_sha256 42dc9ca6223c3b0ba61d6960c611bca08ddeb2283d41657cbf2d0fe7f88d013f`,
+and the same bytes are shelved as `out/onyx-menu-boot-9809edcb.img`. Re-reading
+that file confirms the structure the record depends on: `text_offset` is `0x0`
+(the ABL jump-address bug), the FD starts at shim offset 256, and the header's
+`image_size` `0x300100` equals shim plus 3 MiB exactly, so the volume in the
+image is the volume `scripts/accept-firmware.py` accepted.
+An earlier table row above still disagrees with the file of the same name,
+because each pack rewrites it in place; those rows are dated observations, and an
+image counts as evidence only when a `boot.json` beside it names it, or when its
+hash was taken from the file itself.
+
+### What this round does not claim
+
+No menu, no payload discovery, no QR log and no OS boot. The guard, the series
+order and the fallback are all host-side facts. Milestone 1 — the same image hash
+cold-booting to an interactive UniXNU menu three times with a saved log each
+time — is unmet, so every area in `porting.toml` stays `planned`, and the area
+`firmware` deliberately still has no completion claim.
+
+## Round recorded 2026-11-29 (host, plus the hand-off owner's device photos): the panel log, and a fallback that could not fire
+
+No phone was attached during this round; no `adb` or `fastboot` command was run.
+The device part of this section is three screenshots of the panel's debug console
+that the previous owner took before the hand-off, plus their account of what
+happened after the last one.
+
+### What the panel actually showed before the grey frame
+
+| Screenshot (`/home/firefly/文档/onyx-porting/evidence/20261129/`) | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `page1-dxe-start.png` | 1,471,711 | `2909bb5702583a0a6da6fe9b46ec0928dbbbb7b25507ab4b96401ebd43a01dfd` |
+| `page2-dxe-mid.png` | 1,766,215 | `2ca13c01d3f4a0145525dbcc4cb92f3fd7bad68fa719e0e5b94868b2f38609d5` |
+| `page3-last-before-grey.png` | 1,149,396 | `9b2182bb8e6cc55e5a0b9c9438adf16c2bb1c8fe1f65b007506710ba8c832b73` |
+
+The frames are rotated a quarter turn (the platform's framebuffer is not the
+panel's orientation), and read in that rotation they carry the ordinary DXE
+dispatch log: `Loading driver at 0x... EntryPoint=0x...` for some sixty modules in
+address order, an `[00012732] ChargerPlatform_Init` group, a
+`[00012956] usb_repeater_init` / `qcom repeater found` / `READING: reg 0x...` group,
+`[00013024] usb_redriver_init`, `[00013036] ConnectSts` and a `ButtonsDxeTest:
+Keypress SDAM data payload` line. The last captured frames end mid-dispatch on
+`ConSplitterDxe`, `PrintDxe` and `SimpleTextInOutSerial`, and the previous owner
+reports a grey frame after that.
+
+What this establishes, and what it does not:
+
+- Firmware reached BDS setup. DXE dispatch of the whole volume, the charger, USB
+  and button drivers, ConSplitter and the console plumbing is far past SEC, and
+  this is the first device evidence that the volume built here runs this deep.
+- The readable channel is `DEBUG` through the platform `SerialPortLib`, exactly
+  as `docs/DEVICE-DIAGNOSTIC-FAILURE.md` says; `Print` never appears.
+- The screenshots are not hash-bound to any image. They predate this hand-off, no
+  `boot.json` accompanies them, and the bootloader was not re-initialised for a
+  named hash, so they fix the shape of the failure, not the artefact.
+- None of the three captured pages contains an `ONYX-BOOT: ` line. That is not
+  evidence that the registrar driver did not run: it is placed late in the volume
+  and dispatch had not reached it in the frames that were captured.
+
+### Why patch 0012's fallback cannot have fired, and what the grey frame is
+
+`gEfiEventReadyToBootGuid` is signalled in exactly one place in Mu_Basecore —
+`EfiBootManagerBoot()` (`MdeModulePkg/Library/UefiBootManagerLib/BmBoot.c`), that
+is, only after BDS has already chosen a load option and is about to start it.
+Silicium's `PlatformBootManagerLib` never signals it either. A boot in which BDS
+finds nothing to start therefore never signals `ReadyToBoot`, so the fallback
+armed by `0012` waits for an event that cannot occur: it covers the case where
+registration succeeded and BDS then failed, not the case where there is nothing to
+boot. This is now a correction to the record, not a hypothesis.
+
+That boot ends in `PlatformBootManagerUnableToBoot()`
+(`Silicon/Silicium/SiliciumPkg/Library/BootManagerLib/BootManager.c`), which calls
+`DeviceBootManagerUnableToBoot()`, then `DisplayBootGraphic (BG_NO_BOOT_OS)`, then
+`gBS->Stall (10000000)`, then `gRT->ResetSystem (EfiResetShutdown, ...)`. The
+no-boot-OS graphic is painted over the debug console, which is why the panel turns
+into a featureless grey frame while the console text is still the only place the
+reason was written; `BdsEntry.c` prints `[Bds] Unable to boot!` at `DEBUG_ERROR`
+immediately before that call, so the line above the graphic is the diagnostic the
+next attempt has to capture.
+
+### The hand-off now has an owner that cannot be skipped
+
+Patch `0014` adds `Platforms/Xiaomi/onyxPkg/Library/DeviceBootManagerLib` and maps
+the library class to it in `onyx.dsc`; the inherited instance was
+`SiliciumNullPkg`'s no-op. `PlatformBootManagerAfterConsole()` calls
+`DeviceBootManagerAfterConsole()` once per boot, after console connect and after
+the disk stack is dispatched, and before BDS looks at a single load option. The
+library finds the firmware volume carrying the application file, reads its PE32
+section, and `LoadImage`s plus `StartImage`s it from that buffer. Because the
+application is started there, BDS never reaches its option loop, so
+`PlatformBootManagerUnableToBoot()` becomes unreachable while the application is
+present — the grey frame is removed by construction rather than by a better
+trigger.
+
+Its limits are the same as `0012`'s and are recorded with it: the application and
+BDS must share a firmware volume, image authentication is unchanged, the
+application is started at most once per boot, and a returning application is a
+bring-up signal, not a supported state. Every step prints `DEBUG` at error level
+under the prefix `ONYX-BOOT: ac: `, so the panel log now distinguishes "the
+hand-off ran" from "BDS still had to look for options".
+
+### Rebound artefacts for the next device attempt
+
+The FD rebuilt from the same sources plus `0014` is
+`Build/onyxPkg/DEBUG_CLANGPDB/FV/SILICIUM_UEFI.fd`, 3,145,728 bytes, SHA-256
+`d1ceaae4a58a6042e2b9d704fb7d87189bf94e5a8ca7c5431d766ab708cdf811`.
+`scripts/accept-firmware.py` accepts it with the same nine required modules and 14
+SEC guard markers, 110 inner FFS files, and the decompressed inner volume carries
+29 `ONYX-BOOT: ` markers, nine of them the new `ONYX-BOOT: ac: ` family, next to
+the single `[Bds] Unable to boot!` string.
+
+The menu image packed from it is `out/onyx-menu-boot.img`, 20,779,008 bytes,
+SHA-256 `fc9374e452fbea8bd888877e3c36efd0497857812fbe7b73bc68014bcc757a8e`,
+shelved byte-identically as `out/onyx-menu-boot-fc9374e4.img`; `out/boot.json`
+binds it to FD `d1ceaae4...` and DTB
+`42dc9ca6223c3b0ba61d6960c611bca08ddeb2283d41657cbf2d0fe7f88d013f`, with
+`text_offset` zeroed from `0xa7100000`, so the ABL jump-address bug stays handled.
+
+A second build and pack on 2026-11-29 02:00 (an incremental relink of unchanged
+sources) is recorded here because the firmware is not bit-reproducible and the
+record must not pretend two packs can share one hash. That FD is 3,145,728 bytes,
+SHA-256 `7ca3fe22bea67afb9d0cebe15b616dc110fb8810938470a67dbe8c827c824fb1`; it
+accepts identically — nine required modules, 14 of 14 SEC guard markers, the same
+110 inner FFS files, `ONYX-BOOT: ` 29 times with the nine `ONYX-BOOT: ac: ` new
+lines, and one `[Bds] Unable to boot!` — and it differs from `d1ceaae4` only in
+the eight `PcdDxe` CodeView bytes the record already names as the source of the
+variation. Its image is `out/onyx-menu-boot.img`, 20,779,008 bytes, SHA-256
+`83e75046304d6983a6e211e445737e1917d24c35f06e48f7be7e84deb6b492df`, shelved as
+`out/onyx-menu-boot-83e75046.img`; `out/boot.json` binds it to FD `7ca3fe22...`
+and to the same DTB, with `text_offset` zeroed from `0xa7100000`. The kernel field
+of that image re-hashes to `7ca3fe22...` at shim offset 256, so the volume that
+was accepted is the volume in the file. Both packs are recorded; a device attempt
+names one of them, never "the current image".
+
+### What this round does not claim
+
+No menu, no payload discovery, no QR log, no OS boot. The photos are historical
+device evidence of a firmware that ran deep into dispatch and then fell into the
+unable-to-boot path; `0014` is host-built and host-tested only and has never run
+on hardware. Milestone 1 — one image hash cold-booting to an interactive UniXNU
+menu three times with a saved log each time — is still unmet, and every area in
+`porting.toml` stays `planned`.

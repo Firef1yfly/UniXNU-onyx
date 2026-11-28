@@ -2,7 +2,7 @@
 
 UniXNU already ships the QR menu plugin `package/UniXNUPkg/Driver/AdvancedLogDxe/AdvancedLogDxe.inf` (OneSend frames, Tools menu). It consumes `gAdvancedLoggerProtocolGuid` from `AdvLoggerPkg` and needs `AdvancedLoggerAccessLib`, `QrEncoderLib` (already present in `Common/Mu/MsGraphicsPkg`) and the UniXNU menu plugin protocol.
 
-A temporary onyx firmware build now integrates it. Changes live only in `/tmp/onyx-uefi-shim` and are captured as `patches/uefi/0002-onyx-qr-advanced-logger-diagnostic.patch`:
+A temporary onyx firmware build now integrates it. Changes live only in `/tmp/onyx-uefi-shim`. The patch that captured them, `patches/uefi/0002-onyx-qr-advanced-logger-diagnostic.patch`, was withdrawn on 2026-11-28 because it diffed a stale baseline and described tree content that no longer exists (DebugLib rebinding, `OnyxMapDxe`, `SiliconPkg.dsc.inc`). Its live-surviving wiring is now in `patches/uefi/0009-onyx-dsc-fdf-unixnu-integration.patch`, and its BootShim step in `0007`:
 
 - `onyx.dsc`: adds `AdvancedLogDxe`, per-phase AdvancedLogger libraries (`DXE_CORE`, `DXE_DRIVER`, `UEFI_DRIVER`, `DXE_RUNTIME_DRIVER`, `UEFI_APPLICATION`), `QrEncoderLib`, `AdvancedLoggerHdwPortLibNull`, `AssertLib`, and `PcdUniXNUDeviceModel = "onyx"`.
 - `SiliconPkg.dsc.inc`: maps `AdvancedLoggerAccessLib`, `QrEncoderLib`, `PcdAdvancedLoggerPages = 1024` (4 MiB reserved log buffer). The log buffer is allocated by the DxeCore AdvancedLogger constructor using `AllocateReservedPages`, so no fixed physical address is guessed.

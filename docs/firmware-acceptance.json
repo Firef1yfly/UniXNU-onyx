@@ -1,7 +1,7 @@
 {
-  "artifact": "Build/onyxPkg/DEBUG_CLANGPDB/FV/SILICIUM_UEFI.fd",
+  "artifact": "/home/firefly/\u6587\u6863/onyx-porting/Mu-Silicium/Build/onyxPkg/DEBUG_CLANGPDB/FV/SILICIUM_UEFI.fd",
   "fd_bytes": 3145728,
-  "fd_sha256": "ea2ff3248bd6b44d6a85144af1b95b0bbd5a928d5f6f4a645f475642c4a4922a",
+  "fd_sha256": "d1ceaae4a58a6042e2b9d704fb7d87189bf94e5a8ca7c5431d766ab708cdf811",
   "hardware_tested": false,
   "modules": {
     "AdvancedLogDxe": {
@@ -9,8 +9,8 @@
       "guid": "8D4E7F50-3A2C-4C9A-9E1B-50C4C8472D41",
       "inf": "/home/firefly/\u6587\u6863/onyx-porting/UniXNU/package/UniXNUPkg/Driver/AdvancedLogDxe/AdvancedLogDxe.inf",
       "inf_sha256": "77dced57e7fad55121dbab8241db5bf92e2f31e396925bac91b65d2e5649b2de",
-      "offset": 6142920,
-      "size": 49254,
+      "offset": 6261824,
+      "size": 57446,
       "type": 7
     },
     "DarwinBoot": {
@@ -18,7 +18,7 @@
       "guid": "1B64AF87-8415-4B57-9B16-680D70913B9F",
       "inf": "/home/firefly/\u6587\u6863/onyx-porting/UniXNU/drivers/DarwinBoot/DarwinBootPkg/Driver/DarwinBoot.inf",
       "inf_sha256": "0827d4e59e33699db53d143dd1d6e0c813046b68060a5e78de453b1ba32b4617",
-      "offset": 6380848,
+      "offset": 6532520,
       "size": 57398,
       "type": 7
     },
@@ -27,7 +27,7 @@
       "guid": "6B38F7B4-AD98-40E9-9093-ACA2B5A253C4",
       "inf": "/home/firefly/\u6587\u6863/onyx-porting/Mu-Silicium/Mu_Basecore/MdeModulePkg/Universal/Disk/DiskIoDxe/DiskIoDxe.inf",
       "inf_sha256": "13fa0fcf526b6623e5ce7b5f13773a0ca9ec15a8f338b5f82e46b3e0ad1ba977",
-      "offset": 2257896,
+      "offset": 2286568,
       "size": 41012,
       "type": 7
     },
@@ -36,8 +36,8 @@
       "guid": "CD3BAFB6-50FB-4FE8-8E4E-AB74D2C1A600",
       "inf": "/home/firefly/\u6587\u6863/onyx-porting/Mu-Silicium/Mu_Basecore/MdeModulePkg/Universal/Disk/UnicodeCollation/EnglishDxe/EnglishDxe.inf",
       "inf_sha256": "4e23b5bfc748561a435cc8ca67c4844659c887ed8b41e11c6e0549a888ac006d",
-      "offset": 2405512,
-      "size": 28726,
+      "offset": 2442376,
+      "size": 32822,
       "type": 7
     },
     "Fat": {
@@ -45,8 +45,8 @@
       "guid": "961578FE-B6B7-44C3-AF35-6BC705CD2B1F",
       "inf": "/home/firefly/\u6587\u6863/onyx-porting/Mu-Silicium/Mu_Basecore/FatPkg/EnhancedFatDxe/Fat.inf",
       "inf_sha256": "8995f1a49dbdc02298a0817b43920e751c6e30eaef487146b4953417352b206b",
-      "offset": 2344032,
-      "size": 61480,
+      "offset": 2376800,
+      "size": 65576,
       "type": 7
     },
     "PartitionDxe": {
@@ -54,8 +54,8 @@
       "guid": "1FA1F39E-FEFF-4AAE-BD7B-38A070A3B609",
       "inf": "/home/firefly/\u6587\u6863/onyx-porting/Mu-Silicium/Mu_Basecore/MdeModulePkg/Universal/Disk/PartitionDxe/PartitionDxe.inf",
       "inf_sha256": "91fb1a154796ccaac93aa761c88c5ee0b5d2073dd729d54e9afa410a289f3603",
-      "offset": 2298912,
-      "size": 45114,
+      "offset": 2327584,
+      "size": 49210,
       "type": 7
     },
     "UniXNU": {
@@ -63,17 +63,17 @@
       "guid": "9B665204-A133-47A2-9396-9E2B370A4E25",
       "inf": "/home/firefly/\u6587\u6863/onyx-porting/UniXNU/package/UniXNUPkg/Application/UniXNU/UniXNU.inf",
       "inf_sha256": "8afae643b8f99a923e9c89ed371538f15895ab974a639e894da9a36f7fc5efad",
-      "offset": 6253824,
-      "size": 127024,
+      "offset": 6401400,
+      "size": 131120,
       "type": 9
     },
     "UniXNUDxe": {
       "count": 1,
       "guid": "29B950CF-586D-49EA-9D71-F88645CCDAF6",
       "inf": "/home/firefly/\u6587\u6863/onyx-porting/UniXNU/package/UniXNUPkg/Driver/UniXNUDxe/UniXNUDxe.inf",
-      "inf_sha256": "077045b9876cf528cf9f9b9e21fd5c5ed857798fd009ff265966c81d86e1249c",
-      "offset": 6225040,
-      "size": 28784,
+      "inf_sha256": "4b4599e3f53ce3aa50a28dc658c3b02948da1234e12499bc1c9f31f6c8a36331",
+      "offset": 6360328,
+      "size": 41072,
       "type": 7
     },
     "UniXNURamDiskDxe": {
@@ -81,37 +81,41 @@
       "guid": "75CA63AD-FBAE-4A06-92A0-F937C671251D",
       "inf": "/home/firefly/\u6587\u6863/onyx-porting/UniXNU/package/UniXNUPkg/Driver/UniXNURamDiskDxe/UniXNURamDiskDxe.inf",
       "inf_sha256": "844b6538f609a43a4f3ec5c8f927feb13f588854054eb6a4f13a855653dbb76f",
-      "offset": 6192176,
-      "size": 32858,
+      "offset": 6319272,
+      "size": 41050,
       "type": 7
     }
   },
   "nested_fv": {
-    "compressed_bytes": 1267663,
+    "compressed_bytes": 1271647,
     "compression_guid": "EE4E5898-3914-4259-9D6E-DC7BD79403CF",
-    "decoded_bytes": 8409096,
-    "inner_ffs_count": 109,
-    "inner_fv_length": 8409088,
+    "decoded_bytes": 8605704,
+    "inner_ffs_count": 110,
+    "inner_fv_length": 8605696,
     "wrapper_ffs_guid": "9E21FD93-9C72-4C15-8C4B-E77F1DB2D792",
     "wrapper_prefix_bytes": 8
   },
-  "notice": "Host-side FD structure/module check only; no firmware build, authenticity, device boot, or log export is proven. Build root elided from the recorded path.",
+  "notice": "Host-side FD structure/module check only; no firmware build, authenticity, device boot, or log export is proven.",
   "outer_fv": {
     "ffs_count": 6,
     "guid": "8C8CE578-8A3D-4F1C-9935-896185C32DD3",
     "length": 3145728
   },
   "schema_version": 1,
+  "sec_guard_markers": {
+    "checked": 14,
+    "missing": 0
+  },
   "source_revisions": {
     "uefi": {
       "dirty": true,
       "head": "1d0f1e41018b2519ab9b41b60ac073453e346ba0",
-      "status_lines": 11
+      "status_lines": 19
     },
     "unixnu": {
-      "dirty": false,
+      "dirty": true,
       "head": "fdf81eaa832ce5c850d3c53c698407aa722a4653",
-      "status_lines": 0
+      "status_lines": 2
     }
   }
 }

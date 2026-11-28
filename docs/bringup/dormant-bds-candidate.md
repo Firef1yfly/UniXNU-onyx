@@ -4,6 +4,17 @@ This patch is dormant. It is not applied to the original Mu-Silicium tree,
 and is not a claim that BDS registration is the cause of any prior black
 screen or `No Operating System Found` result.
 
+Series status (2026-11-28): the candidate is withdrawn from the patch series.
+`patches/uefi/0003-onyx-bds-platform-option.patch` was removed because
+`onyxPkg/OnyxBootOptions.c/.inf` and the `PlatformBootOptionsLib` binding never
+landed in the Mu tree, and because the approach still needs the application
+volume's device path - the exact thing that is missing when registration is
+untrustworthy. The boot path is hardened elsewhere: patch 0012 makes
+`UniXNUDxe` fall back to `LoadImage`/`StartImage` from the volume, and
+`Tests/OnyxBootPath` covers it on the host. Landing this candidate now would
+add a second boot-option provider without a test that shows the existing path
+failing at a known stage.
+
 The candidate replaces only the onyx DSC `PlatformBootOptionsLib` mapping and
 adds the board-local provider source/INF. It does **not** add the provider as
 a `[Components]` entry or an FDF/FFS, and it does not change BootShim, APRIORI,

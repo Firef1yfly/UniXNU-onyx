@@ -2,9 +2,9 @@
 
 [English](README.md) | 简体中文
 
-**实验性重建项目。目前尚未实现任何成功的 UEFI 启动** —— bootloader 接受了镜像，
-但还没有观察到固件真正运行。全程未刷写任何分区，所有设备测试都只使用
-`fastboot boot`。
+**实验性重建项目。目前尚未实现任何成功的 UEFI 启动** —— 在真机上观察到固件已经跑完
+DXE 派发，随后落入平台的 unable-to-boot 路径（灰屏），但从未到达任何启动项、菜单或
+操作系统。全程未刷写任何分区，所有设备测试都只使用 `fastboot boot`。
 
 ## 当前范围
 
@@ -19,7 +19,11 @@
 ## 固件当前进度
 
 Mu-Silicium 的 DEBUG CLANGPDB 构建可以通过，产出的 3 MiB 固件卷通过离线的字节级
-验收检查。bootloader 接受该镜像，但至今没有观察到任何固件输出。改动这里任何内容
+验收检查。在真机上该固件卷派发了整套 DXE 驱动——面板上留下三屏经平台 `SerialPortLib`
+输出的 `DEBUG` 文本——随后停在灰屏，也就是平台 BDS 放弃所有启动项时绘制的
+`PlatformBootManagerUnableToBoot` 画面。现在交棒由 `PlatformBootManagerAfterConsole()`
+经平台的 `DeviceBootManagerLib` 负责，只要应用还在固件卷里，BDS 就不会再走到那条路径。
+以上都还没有到达菜单。改动这里任何内容
 之前，请先阅读[接手记录](docs/TAKEOVER-UEFI.md)。
 
 ### onyx 的 bootloader 会把 `text_offset` 加到跳转地址上
