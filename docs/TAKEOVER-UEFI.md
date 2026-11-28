@@ -300,6 +300,11 @@ framebuffer mode still has to be measured.
 | `onyx-menu-boot.img` | includes `OnyxBringupReportDxe` | paints a checkpoint colour and halts, so the stage is readable |
 | `onyx-menu-boot-nodiag.img` | same firmware without that driver | runs BDS to completion, so the menu or `No Operating System Found!` appears |
 
+The report also mirrors `FindApplication`: it counts firmware volumes, how many
+carry a device path, and how many hold `UniXNU.efi`, because `UniXNUDxe` cannot
+register a boot option when either is missing — and an empty `BootOrder` looks
+identical to a BDS that ignores a valid one.
+
 Test the second one first once the panel geometry is correct: `Print` in
 `PlatformBootManagerUnableToBoot` is not DEBUG-gated, so either outcome is
 visible without any extra instrumentation.

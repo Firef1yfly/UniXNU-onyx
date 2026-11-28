@@ -1,9 +1,9 @@
 diff --git a/Platforms/Xiaomi/onyxPkg/Drivers/OnyxBringupReportDxe/OnyxBringupReportDxe.c b/Platforms/Xiaomi/onyxPkg/Drivers/OnyxBringupReportDxe/OnyxBringupReportDxe.c
 new file mode 100644
-index 0000000..1f35933
+index 0000000..ad10ee4
 --- /dev/null
 +++ b/Platforms/Xiaomi/onyxPkg/Drivers/OnyxBringupReportDxe/OnyxBringupReportDxe.c
-@@ -0,0 +1,165 @@
+@@ -0,0 +1,205 @@
 +/** @file
 +  Bring-up report: why does BDS find nothing to boot?
 +
@@ -32,6 +32,9 @@ index 0000000..1f35933
 +#include <Library/UefiRuntimeServicesTableLib.h>
 +#include <Protocol/FirmwareVolume2.h>
 +#include <Protocol/GraphicsOutput.h>
++#include <Protocol/DevicePath.h>
++#include <Library/DevicePathLib.h>
++#include <Library/PcdLib.h>
 +
 +STATIC CONST EFI_GUID  mEntryArgHobGuid = {
 +  0xDAEE82E6, 0x8090, 0x4E72, { 0xBF, 0xB9, 0x78, 0xC1, 0x3C, 0xD4, 0xE3, 0x59 }
@@ -131,16 +134,53 @@ index 0000000..1f35933
 +  EFI_STATUS  Status;
 +  EFI_HANDLE  *Handles;
 +  UINTN       Count;
++  UINTN       Index;
 +  VOID        *Hob;
 +
 +  Hob = GetFirstGuidHob (&mEntryArgHobGuid);
 +  Print (L"  handoff HOB: %s\r\n", (Hob == NULL) ? L"absent" : L"present");
 +
++  //
++  // Mirror what UniXNUDxe does: it can only register a boot option when a
++  // firmware volume both carries a device path and holds the application.
++  //
 +  Status = gBS->LocateHandleBuffer (ByProtocol, &gEfiFirmwareVolume2ProtocolGuid, NULL, &Count, &Handles);
 +  if (EFI_ERROR (Status)) {
 +    Print (L"  firmware volumes: %r\r\n", Status);
 +  } else {
-+    Print (L"  firmware volumes: %u\r\n", (UINT32)Count);
++    UINTN       WithPath = 0;
++    UINTN       WithApp  = 0;
++    EFI_HANDLE  AppHandle = NULL;
++
++    for (Index = 0; Index < Count; Index++) {
++      EFI_FIRMWARE_VOLUME2_PROTOCOL  *Fv;
++      EFI_FV_FILETYPE                Type;
++      EFI_FV_FILE_ATTRIBUTES         Attributes;
++      UINT32                         AuthStatus;
++      UINTN                          Size;
++
++      if (DevicePathFromHandle (Handles[Index]) != NULL) {
++        WithPath++;
++      }
++
++      if (!EFI_ERROR (gBS->HandleProtocol (Handles[Index], &gEfiFirmwareVolume2ProtocolGuid, (VOID **)&Fv)) &&
++          !EFI_ERROR (Fv->ReadFile (Fv, (CONST EFI_GUID *)PcdGetPtr (PcdUniXNUApplicationFile),
++                                    NULL, &Size, &Type, &Attributes, &AuthStatus)))
++      {
++        WithApp++;
++        if (AppHandle == NULL) {
++          AppHandle = Handles[Index];
++        }
++      }
++    }
++
++    Print (L"  firmware volumes: %u (%u with device path)\r\n", (UINT32)Count, (UINT32)WithPath);
++    Print (L"  volumes holding UniXNU.efi: %u\r\n", (UINT32)WithApp);
++    if (AppHandle != NULL) {
++      Print (L"  that volume has a device path: %s\r\n",
++             (DevicePathFromHandle (AppHandle) != NULL) ? L"yes" : L"no");
++    }
++
 +    FreePool (Handles);
 +  }
 +
@@ -171,10 +211,10 @@ index 0000000..1f35933
 +}
 diff --git a/Platforms/Xiaomi/onyxPkg/Drivers/OnyxBringupReportDxe/OnyxBringupReportDxe.inf b/Platforms/Xiaomi/onyxPkg/Drivers/OnyxBringupReportDxe/OnyxBringupReportDxe.inf
 new file mode 100644
-index 0000000..37f54c6
+index 0000000..f08400d
 --- /dev/null
 +++ b/Platforms/Xiaomi/onyxPkg/Drivers/OnyxBringupReportDxe/OnyxBringupReportDxe.inf
-@@ -0,0 +1,40 @@
+@@ -0,0 +1,46 @@
 +## @file
 +#  Bring-up report driver: prints the boot-option state BDS will act on.
 +#
@@ -196,6 +236,7 @@ index 0000000..37f54c6
 +[Packages]
 +  MdePkg/MdePkg.dec
 +  MdeModulePkg/MdeModulePkg.dec
++  UniXNUPkg/UniXNUPkg.dec
 +
 +[LibraryClasses]
 +  UefiDriverEntryPoint
@@ -206,9 +247,14 @@ index 0000000..37f54c6
 +  MemoryAllocationLib
 +  HobLib
 +  PrintLib
++  DevicePathLib
++  PcdLib
 +
 +[Guids]
 +  gEfiGlobalVariableGuid
++
++[Pcd]
++  gUniXNUPkgTokenSpaceGuid.PcdUniXNUApplicationFile
 +
 +[Protocols]
 +  gEfiFirmwareVolume2ProtocolGuid
