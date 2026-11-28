@@ -730,3 +730,51 @@ counter stops advancing, and nothing observed so far suggests it does. The
 falsifying observation is cheap to state: a log whose timestamps stop changing, or
 a `Stall` that returns instantly, would send this back for a physical-timer build
 to compare. Recorded 2026-11-29.
+
+## Found before the next attempt: nothing is connected when the hook runs
+
+Reading the call site instead of assuming it found a second gap in `0014`, and it
+is the kind that would have looked like "the menu came up but the payload volume
+was empty".
+
+`MdeModulePkg/Universal/BdsDxe/BdsEntry.c` reaches
+`PlatformBootManagerAfterConsole()` after exactly three things: platform recovery
+bookkeeping, the hotkey service, the driver load options, and
+`EfiBootManagerConnectAllDefaultConsoles()`. It does **not** call
+`EfiBootManagerConnectAll()` — that happens later, inside
+`EfiBootManagerBoot()`. So at the moment our hook starts the application, every
+driver is dispatched but **no driver is attached to any device**.
+
+That matters because `UniXNULib/Config.c` finds its configuration by
+`LocateHandleBuffer (ByProtocol, &gEfiSimpleFileSystemProtocolGuid, …)`, and
+`UniXNURamDiskDxe` publishes only `BlockIo` + `DevicePath`. A FAT volume exists
+on the bootloader's ramdisk only after `DiskIo` → `Partition` → `Fat` have been
+connected to that block device. Without a connection there is no
+`SimpleFileSystem` handle at all, so the menu would have come up on a system where
+its own payload volume does not exist — milestone step 5 would fail for a reason
+unrelated to the payload.
+
+`DeviceBootManagerAfterConsole()` now connects the block devices before the
+hand-off and logs how many filesystems exist afterwards:
+
+```text
+ONYX-BOOT: ac: block device 0 connect: Success
+ONYX-BOOT: ac: filesystems after connect: 1
+```
+
+Only block devices are connected, not the whole device tree: the firmware volume
+carrying the application is already connected (BDS read it from there), so USB,
+network and display controllers stay on the path BDS would have taken. The
+filesystem count is the point — `0` means the next log lines cannot be about the
+menu, and the payload discovery chain (design 2.5) is where to look.
+
+### Rebound artefacts
+
+FD `13fb233b585b05d08f68f5124a0e737f37561553eb085a61714fccede0d3880d` (3,145,728
+bytes, 9 accepted modules, 14 of 14 SEC guard markers, 12 `ONYX-BOOT: ac: `
+markers in the inner volume). Menu image `out/onyx-menu-boot.img`, 20,779,008
+bytes, SHA-256 `a4c34dd2e2b97cc087321bcf7ad84d3eeaec2ff878cb1f1b29ce8bd5032f32d5`,
+shelved as `out/onyx-menu-boot-a4c34dd2.img`; its kernel field re-hashes to that FD
+at shim offset 256 and its `text_offset` is zero. The nine-patch series still
+replays onto the pins byte-identically with this change. None of it has run on
+hardware.

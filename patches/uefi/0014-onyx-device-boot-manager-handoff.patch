@@ -20,6 +20,14 @@
 #   StartImage's it. Because the application is started there, BDS never reaches
 #   its option loop and the unable-to-boot path becomes unreachable while the
 #   application is present.
+# Before the hand-off: BDS calls this hook with the consoles up and every driver
+#   dispatched, but with nothing connected to any device - ConnectAll runs only
+#   later, inside EfiBootManagerBoot(). UniXNU looks for its configuration by
+#   enumerating SimpleFileSystem handles (UniXNULib/Config.c), and the payload
+#   volume is a FAT filesystem on the ramdisk the bootloader handed over, so with
+#   no connection there is no filesystem at all. DeviceBootManagerAfterConsole()
+#   therefore connects the block devices first and logs how many filesystems
+#   exist afterwards, which is the bring-up signal for milestone step 5.
 # Limits: LoadImage(TRUE, gImageHandle, NULL, ...) needs the application and BDS
 #   in the same firmware volume, as 0012 does; image authentication is unchanged.
 #   The application is started at most once per boot. If it returns, the status
@@ -31,10 +39,10 @@
 #   writes nothing through it.
 diff --git a/Platforms/Xiaomi/onyxPkg/Library/DeviceBootManagerLib/DeviceBootManagerLib.c b/Platforms/Xiaomi/onyxPkg/Library/DeviceBootManagerLib/DeviceBootManagerLib.c
 new file mode 100644
-index 0000000..55a7734
+index 0000000..bdc394c
 --- /dev/null
 +++ b/Platforms/Xiaomi/onyxPkg/Library/DeviceBootManagerLib/DeviceBootManagerLib.c
-@@ -0,0 +1,258 @@
+@@ -0,0 +1,317 @@
 +/** @file
 +  onyx device boot manager.
 +
@@ -90,8 +98,10 @@ index 0000000..55a7734
 +#include <Library/UefiBootServicesTableLib.h>
 +#include <Library/UefiLib.h>
 +#include <Pi/PiFirmwareFile.h>
++#include <Protocol/BlockIo.h>
 +#include <Protocol/FirmwareVolume2.h>
 +#include <Protocol/LoadedImage.h>
++#include <Protocol/SimpleFileSystem.h>
 +#endif
 +
 +#define ONYX_BOOT_PREFIX  "ONYX-BOOT: ac: "
@@ -129,6 +139,62 @@ index 0000000..55a7734
 +// the system, so a board that publishes the file from a nested volume still
 +// works.
 +//
++//
++// BDS calls this hook before it connects anything: the consoles are up and every
++// driver is dispatched, but no driver has been attached to a device. The payload
++// volume UniXNU reads its configuration from is a FAT filesystem on the ramdisk
++// the bootloader handed over, and that filesystem only exists after DiskIo,
++// Partition and Fat have been connected to the ramdisk's block device. Without
++// this, UniXNU would start on a system with no SimpleFileSystem handle at all.
++//
++// Only block devices are connected, not the whole device tree: the firmware
++// volume carrying the application is already connected (BDS read it), so USB,
++// network and display controllers are left to the path BDS takes after this hook.
++//
++STATIC
++VOID
++ConnectBlockDevices (
++  VOID
++  )
++{
++  EFI_HANDLE  *Handles;
++  UINTN       Count;
++  UINTN       Index;
++  UINTN       Filesystems;
++  EFI_STATUS  Status;
++
++  Handles = NULL;
++  Count   = 0;
++  Status  = gBS->LocateHandleBuffer (ByProtocol, &gEfiBlockIoProtocolGuid, NULL, &Count, &Handles);
++  if (EFI_ERROR (Status)) {
++    DEBUG ((DEBUG_ERROR, ONYX_BOOT_PREFIX "no block devices to connect: %r\n", Status));
++    return;
++  }
++
++  for (Index = 0; Index < Count; Index++) {
++    Status = gBS->ConnectController (Handles[Index], NULL, NULL, TRUE);
++    DEBUG ((DEBUG_ERROR, ONYX_BOOT_PREFIX "block device %u connect: %r\n", Index, Status));
++  }
++
++  FreePool (Handles);
++
++  //
++  // The count is the bring-up signal that matters: one filesystem means the
++  // payload volume is reachable, zero means the hand-off will start UniXNU on a
++  // system where its own configuration cannot be found.
++  //
++  Handles = NULL;
++  Count   = 0;
++  Filesystems = 0;
++  Status = gBS->LocateHandleBuffer (ByProtocol, &gEfiSimpleFileSystemProtocolGuid, NULL, &Count, &Handles);
++  if (!EFI_ERROR (Status)) {
++    Filesystems = Count;
++    FreePool (Handles);
++  }
++
++  DEBUG ((DEBUG_ERROR, ONYX_BOOT_PREFIX "filesystems after connect: %u\n", Filesystems));
++}
++
 +STATIC
 +EFI_HANDLE
 +FindApplicationVolume (
@@ -231,6 +297,7 @@ index 0000000..55a7734
 +  }
 +
 +  mApplicationStarted = TRUE;
++  ConnectBlockDevices ();
 +  File                = (CONST EFI_GUID *)PcdGetPtr (PcdUniXNUApplicationFile);
 +  Status              = StartApplication (File);
 +
@@ -295,10 +362,10 @@ index 0000000..55a7734
 +}
 diff --git a/Platforms/Xiaomi/onyxPkg/Library/DeviceBootManagerLib/DeviceBootManagerLib.inf b/Platforms/Xiaomi/onyxPkg/Library/DeviceBootManagerLib/DeviceBootManagerLib.inf
 new file mode 100644
-index 0000000..e6f8de4
+index 0000000..fce92c2
 --- /dev/null
 +++ b/Platforms/Xiaomi/onyxPkg/Library/DeviceBootManagerLib/DeviceBootManagerLib.inf
-@@ -0,0 +1,38 @@
+@@ -0,0 +1,40 @@
 +## @file
 +#  onyx device boot manager: hands control from platform BDS to UniXNU.
 +#
@@ -332,8 +399,10 @@ index 0000000..e6f8de4
 +  UefiLib
 +
 +[Protocols]
++  gEfiBlockIoProtocolGuid          ## CONSUMES
 +  gEfiFirmwareVolume2ProtocolGuid  ## CONSUMES
 +  gEfiLoadedImageProtocolGuid      ## CONSUMES
++  gEfiSimpleFileSystemProtocolGuid ## CONSUMES
 +
 +[Pcd]
 +  gUniXNUPkgTokenSpaceGuid.PcdUniXNUApplicationFile  ## CONSUMES
