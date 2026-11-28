@@ -43,6 +43,12 @@ hung the device only after that field was zeroed, which confirms the mechanism.
 
 Any packaging step must zero `text_offset` in the packed image after the packer
 verifies its own output, and record the original value in `boot.json`.
+[scripts/make-menu-image.py](scripts/make-menu-image.py) does this:
+
+```sh
+python3 scripts/make-menu-image.py --fd <SILICIUM_UEFI.fd> --dtb <device.dtb> \
+  --ramdisk <payload.img> --output out/onyx-menu-boot.img
+```
 
 Signing is not the obstacle: a stock image with one byte flipped still boots.
 

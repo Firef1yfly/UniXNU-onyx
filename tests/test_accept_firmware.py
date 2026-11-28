@@ -1,4 +1,5 @@
 import hashlib
+import os
 import importlib.util
 import lzma
 import struct
@@ -134,6 +135,11 @@ class FirmwareAcceptanceTests(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 
+MU_SOURCE = Path(os.environ.get("ONYX_UEFI", ROOT / ".." / "Mu-Silicium")).resolve()
+
+
+@unittest.skipUnless((MU_SOURCE / "Silicon/Silicium/SiliciumPkg/Sec/OnyxHandoff.c").is_file(),
+                     "Mu-Silicium checkout with the onyx SEC guard is not present")
 class SecGuardMarkerTests(unittest.TestCase):
     """The compact volume must carry the SEC guard, not just its source."""
 
@@ -143,7 +149,7 @@ class SecGuardMarkerTests(unittest.TestCase):
             "accept_fw", Path(__file__).resolve().parents[1] / "scripts/accept-firmware.py")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        markers = module._sec_markers(Path(__file__).resolve().parents[1] / ".." / "Mu-Silicium")
+        markers = module._sec_markers(MU_SOURCE)
         self.assertGreaterEqual(len(markers), 5, markers)
         for marker in markers:
             self.assertTrue(marker.startswith("ONYX:"), marker)

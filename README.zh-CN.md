@@ -35,7 +35,12 @@ ABL 按 `跳转地址 = 加载地址 + text_offset` 计算入口。把固件基�
 用只做无条件自跳的探针 shim 验证：仅当该字段被置零后，设备才会真的卡死，机制由此确认。
 
 任何打包流程都必须在打包器自检完成后把 `text_offset` 清零，并把原值记录进
-`boot.json`。
+`boot.json`。[scripts/make-menu-image.py](scripts/make-menu-image.py) 已实现这一处理：
+
+```sh
+python3 scripts/make-menu-image.py --fd <SILICIUM_UEFI.fd> --dtb <device.dtb> \
+  --ramdisk <payload.img> --output out/onyx-menu-boot.img
+```
 
 签名不是障碍：把 stock 镜像改坏一个字节后，它依然能正常启动。
 
