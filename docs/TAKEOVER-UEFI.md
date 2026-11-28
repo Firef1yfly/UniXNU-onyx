@@ -329,6 +329,25 @@ to the dead loop. The dead loop now only guards arithmetic overflow. This remove
 a failure mode where a bootloader that loaded the image near `FD_BASE` would have
 parked the CPU permanently.
 
+## Repository publication status
+
+Checked against the device repository specification
+(`docs/porting/device-repository.md` in UniXNU):
+
+| Requirement | State |
+| --- | --- |
+| `board.toml` format 2, `porting.toml` format 1, matching identity | done; record checker passes (13 areas) |
+| `feeds.toml`, `unixnu.lock`, `configs/`, `dts/`, `patches/xnu/series`, `package/` | present |
+| `proprietary-files.txt`, firmware patches, DSC/FDF integration | done, as `patches/uefi/0001`-`0011` |
+| `README.md`, `AGENTS.md` with scope, commands and guide links | done, in English and Chinese |
+| `.gitignore`, `local.toml.example` | done; local paths and generated output ignored |
+| `unixnu` GitHub topic | added and verified |
+| `.github/workflows/porting-record.yml`, `package.yml` | written; not pushed yet because the current token lacks the `workflow` scope |
+| `board.example` | stays `true`; the hardware inputs are incomplete and the specification forbids claiming otherwise |
+
+`check-inputs.py` still fails closed, as it must while the DRAM evidence and
+`inputs.toml` provenance are missing.
+
 ## Hardware status and safety
 
 No successful UEFI/menu boot is claimed. A prior `fastboot boot` attempt was black-screen/unobserved and was recovered by rebooting Android; it did not demonstrate UEFI success. No `fastboot flash` or partition write is part of this work. Any future device attempts remain `fastboot boot` only, after log capture and recovery readiness.
