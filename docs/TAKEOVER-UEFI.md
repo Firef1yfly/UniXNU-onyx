@@ -768,6 +768,13 @@ network and display controllers stay on the path BDS would have taken. The
 filesystem count is the point — `0` means the next log lines cannot be about the
 menu, and the payload discovery chain (design 2.5) is where to look.
 
+One assumption is stated rather than proved: the payload volume is a bare FAT
+filesystem with no partition table (`mformat -i`), and `FatDxe` mounts a
+partition-less superfloppy directly while `PartitionDxe` finds nothing to create.
+If that assumption is wrong the log will say so immediately — the filesystem count
+stays at `0` even though every connect reported `Success` — and the fix is a
+partitioned image, not a firmware change.
+
 ### Rebound artefacts
 
 FD `13fb233b585b05d08f68f5124a0e737f37561553eb085a61714fccede0d3880d` (3,145,728
