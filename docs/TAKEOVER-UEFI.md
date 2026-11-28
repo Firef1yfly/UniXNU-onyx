@@ -695,3 +695,38 @@ unable-to-boot path; `0014` is host-built and host-tested only and has never run
 on hardware. Milestone 1 — one image hash cold-booting to an interactive UniXNU
 menu three times with a saved log each time — is still unmet, and every area in
 `porting.toml` stays `planned`.
+
+## Design-doc question settled on evidence: which counter does the timer run on
+
+The port design left `USE_PHYSICAL_TIMER` open for onyx: the platform could use
+the EL1 physical counter or the EL1 virtual counter, and the wrong choice shows up
+late, as a firmware whose `TimerDxe` interrupts never arrive, whose `Stall` calls
+return at once or never, and whose event log has no usable time base. It is not a
+free choice: it has to match what the bootloader left behind.
+
+Two facts settle it, and neither needs the phone:
+
+- `Silicon/Qualcomm/BonitoPkg/BonitoPkg.dsc.inc` — the package onyx's `onyx.dsc`
+  includes — sets `USE_PHYSICAL_TIMER = 0`, and
+  `Silicon/Silicium/SiliciumPkg/SiliciumPkg.dsc.inc` turns exactly that into
+  `ArmGenericTimerVirtCounterLib` (the virtual counter, `CNTVCT_EL0`) versus
+  `ArmGenericTimerPhyCounterLib`. Every other Qualcomm package in the same tree
+  makes the same choice, so this is the family default, not a stray value.
+- No interrupt-number override is needed either: `ArmPkg.dec` defaults
+  `PcdArmArchTimerIntrNum` to 30 and `PcdArmArchTimerVirtIntrNum` to 27, which are
+  the Qualcomm PPIs, and `TimerDxe` reads whichever one the counter library
+  selected. BonitoPkg overrides neither.
+
+The device evidence agrees. The panel frames recorded before the hand-off carry
+increasing `[000xxxxx]` timestamps across a dispatch log of about sixty modules, a
+`gBS->Stall (10000000)` around the unable-to-boot path, and a ten-second pause
+between the last frame and the grey one — all of which need a running time base.
+A frozen counter would have shown as identical timestamps and as a stall that
+returns immediately.
+
+Decision: **keep `USE_PHYSICAL_TIMER = 0`; add no override to `onyx.dsc`.** The
+`CNTCTLBase`/`CNTHCTL_EL2` question the design raised only matters if the virtual
+counter stops advancing, and nothing observed so far suggests it does. The
+falsifying observation is cheap to state: a log whose timestamps stop changing, or
+a `Stall` that returns instantly, would send this back for a physical-timer build
+to compare. Recorded 2026-11-29.
