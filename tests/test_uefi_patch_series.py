@@ -161,6 +161,56 @@ def header(name):
     return '\n'.join(lines)
 
 
+def added_source(name, path_fragment):
+    """Lines 0014 adds to one source file, without the diff markers."""
+    body = patch_text(name)
+    block = body.split(f'diff --git a/{path_fragment} b/{path_fragment}', 1)
+    assert len(block) == 2, f'{name} does not touch {path_fragment}'
+    return [line[1:] for line in block[1].split('\ndiff --git ')[0].splitlines()
+            if line.startswith('+') and not line.startswith('+++')]
+
+
+class DeviceBootManagerTests(unittest.TestCase):
+    """0014 owns the hand-off, and the order inside it is the contract.
+
+    BDS calls the hook with the consoles up and every driver dispatched but
+    nothing connected, so the library has to do the connecting itself before it
+    starts the application. Getting this order wrong does not fail the build and
+    does not fail on the host: it fails on the phone as a menu without a payload
+    volume or without a keyboard.
+    """
+
+    SOURCE = 'Platforms/Xiaomi/onyxPkg/Library/DeviceBootManagerLib/DeviceBootManagerLib.c'
+    PATCH = '0014-onyx-device-boot-manager-handoff.patch'
+
+    def test_block_devices_are_connected_before_the_application_starts(self):
+        lines = added_source(self.PATCH, self.SOURCE)
+        body = '\n'.join(lines)
+        order = [body.find(call) for call in ('ConnectBlockDevices ();', 'ConnectConsoleInput ();',
+                                              'StartApplication (File);')]
+        self.assertTrue(all(index >= 0 for index in order), f'a call is missing: {order}')
+        self.assertEqual(order, sorted(order),
+                         'the connects must happen before StartApplication, in this order')
+
+    def test_the_console_input_is_connected_because_bds_leaves_it_lazy(self):
+        body = '\n'.join(added_source(self.PATCH, self.SOURCE))
+        self.assertIn('EfiBootManagerConnectConsoleVariable (ConIn);', body,
+                      'SiliciumPkg.dsc.inc sets PcdConInConnectOnDemand, so BDS connects '
+                      'ConOut and ErrOut only; the hook owns ConIn')
+
+    def test_only_block_devices_are_connected_not_the_whole_tree(self):
+        body = '\n'.join(added_source(self.PATCH, self.SOURCE))
+        self.assertIn('gEfiBlockIoProtocolGuid', body)
+        self.assertNotIn('ConnectAll ()', body,
+                         'connecting every controller is BDS\'s later job; the hook connects '
+                         'the devices the menu needs')
+
+    def test_each_step_reports_a_count_the_panel_can_be_read_against(self):
+        body = '\n'.join(added_source(self.PATCH, self.SOURCE))
+        self.assertIn('filesystems after connect: %u', body)
+        self.assertIn('input devices after connect: %u', body)
+
+
 class UefiSeriesTests(unittest.TestCase):
     def test_series_list_is_exactly_the_reviewed_one(self):
         self.assertEqual(patch_files(), SERIES)
