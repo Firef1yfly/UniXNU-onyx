@@ -98,6 +98,7 @@ The Mu-Silicium side is carried as a series in [patches/uefi](patches/uefi):
 | `0008` | SEC: fail-closed FDT/initrd handoff guard, ownership decided before any dereference |
 | `0009` | DSC/FDF: UniXNU stack, Advanced Logger, `FdtLib`, PE alignment `0x1000`, `/Brepro` |
 | `0010` | host tests for BootShim and the handoff guard |
+| `0011` | bring-up report driver: paints DXE checkpoints into the framebuffer and halts |
 
 `0007`–`0010` apply cleanly, in order, to a fresh `Firef1yfly/Mu-Silicium` checkout.
 

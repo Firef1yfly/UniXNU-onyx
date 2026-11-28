@@ -1,8 +1,20 @@
 diff --git a/Platforms/Xiaomi/onyxPkg/onyx.dsc b/Platforms/Xiaomi/onyxPkg/onyx.dsc
-index 84c2790..2422899 100644
+index 84c2790..6e408d1 100644
 --- a/Platforms/Xiaomi/onyxPkg/onyx.dsc
 +++ b/Platforms/Xiaomi/onyxPkg/onyx.dsc
-@@ -44,6 +44,8 @@
+@@ -28,6 +28,11 @@
+ !include BonitoPkg/BonitoPkg.dsc.inc
+ 
+ [PcdsFixedAtBuild]
++  #
++  # Bring-up: keep only error-level output so an exception dump stays on screen.
++  # The default level floods the console and pushes the exception header away.
++  #
++  gEfiMdePkgTokenSpaceGuid.PcdDebugPrintErrorLevel|0x80000000
+   #
+   # DDR Memory
+   #
+@@ -44,6 +49,8 @@
    #
    gUniXNUPkgTokenSpaceGuid.PcdUniXNUDebugLevel|0x00000040
    gUniXNUPkgTokenSpaceGuid.PcdUniXNUConfigPath|L"\\EFI\\UniXNU\\unixnu.toml"
@@ -11,7 +23,7 @@ index 84c2790..2422899 100644
  
    #
    # SMBIOS
-@@ -81,6 +83,25 @@
+@@ -81,6 +88,17 @@
    # UniXNU boot manager
    #
    UniXNULib|UniXNUPkg/Library/UniXNULib/UniXNULib.inf
@@ -21,31 +33,24 @@ index 84c2790..2422899 100644
 +  AssertLib|AdvLoggerPkg/Library/AssertLib/AssertLib.inf
 +  QrEncoderLib|MsGraphicsPkg/Library/QrEncoderLib/QrEncoderLib.inf
 +
-+# Keep SEC framebuffer diagnostics: DXE logs become available through the Tools
-+# QR exporter only after GOP, console input and the UniXNU menu work.
-+[LibraryClasses.common.DXE_CORE]
-+  DebugLib|AdvLoggerPkg/Library/BaseDebugLibAdvancedLogger/BaseDebugLibAdvancedLogger.inf
-+  AdvancedLoggerLib|AdvLoggerPkg/Library/AdvancedLoggerLib/DxeCore/AdvancedLoggerLib.inf
-+
-+[LibraryClasses.common.DXE_DRIVER,LibraryClasses.common.UEFI_DRIVER,LibraryClasses.common.UEFI_APPLICATION]
-+  DebugLib|AdvLoggerPkg/Library/BaseDebugLibAdvancedLogger/BaseDebugLibAdvancedLogger.inf
-+  AdvancedLoggerLib|AdvLoggerPkg/Library/AdvancedLoggerLib/Dxe/AdvancedLoggerLib.inf
-+
-+[LibraryClasses.common.DXE_RUNTIME_DRIVER]
-+  DebugLib|AdvLoggerPkg/Library/BaseDebugLibAdvancedLogger/BaseDebugLibAdvancedLogger.inf
-+  AdvancedLoggerLib|AdvLoggerPkg/Library/AdvancedLoggerLib/Runtime/AdvancedLoggerLib.inf
++# Bring-up draws DXE debug output on the framebuffer through the platform
++# SerialPortLib. Routing it into the Advanced Logger RAM buffer instead makes the
++# QR exporter the only reader, and that exporter needs a working menu, so a stall
++# between SEC and the menu leaves no observable output at all. AdvancedLogDxe
++# stays in the volume and will report "no log" until DebugLib is switched back.
  
  [Components]
    #
-@@ -91,6 +112,7 @@
+@@ -91,6 +109,8 @@
    #
    # UniXNU boot manager stack
    #
++  onyxPkg/Drivers/OnyxBringupReportDxe/OnyxBringupReportDxe.inf
 +  UniXNUPkg/Driver/AdvancedLogDxe/AdvancedLogDxe.inf
    UniXNUPkg/Driver/UniXNURamDiskDxe/UniXNURamDiskDxe.inf
    UniXNUPkg/Driver/UniXNUDxe/UniXNUDxe.inf
    UniXNUPkg/Application/UniXNU/UniXNU.inf
-@@ -101,4 +123,19 @@
+@@ -101,4 +121,19 @@
    FatPkg/EnhancedFatDxe/Fat.inf
  
  [BuildOptions]
@@ -67,12 +72,16 @@ index 84c2790..2422899 100644
 +[BuildOptions.common.EDKII.DXE_RUNTIME_DRIVER]
 +  *_CLANGPDB_*_DLINK_FLAGS = /ALIGN:0x10000 /Brepro
 diff --git a/Platforms/Xiaomi/onyxPkg/onyx.fdf b/Platforms/Xiaomi/onyxPkg/onyx.fdf
-index f454fae..a4645bf 100644
+index f454fae..622cbb9 100644
 --- a/Platforms/Xiaomi/onyxPkg/onyx.fdf
 +++ b/Platforms/Xiaomi/onyxPkg/onyx.fdf
-@@ -84,6 +84,7 @@ READ_LOCK_STATUS   = TRUE
+@@ -83,7 +83,11 @@ READ_LOCK_STATUS   = TRUE
+   !include Include/DXE.inc
    !include Include/RAW.inc
  
++  # Bring-up diagnostics (temporary)
++  INF onyxPkg/Drivers/OnyxBringupReportDxe/OnyxBringupReportDxe.inf
++
    # UniXNU boot manager stack
 +  INF UniXNUPkg/Driver/AdvancedLogDxe/AdvancedLogDxe.inf
    INF UniXNUPkg/Driver/UniXNURamDiskDxe/UniXNURamDiskDxe.inf

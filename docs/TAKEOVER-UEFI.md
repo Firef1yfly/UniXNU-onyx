@@ -203,23 +203,90 @@ the new SHA-256 in `boot.json`. `BootShim` still copies to `FD_BASE` from its
 instruction stream, so the firmware lands where its memory map expects it; only
 the bootloader-visible field changes.
 
+### First confirmed execution
+
+After zeroing `text_offset`, image `25c0d07a...` ran on the device: USB dropped
+about four seconds after `Booting OKAY` and stayed gone for roughly a minute, the
+screen showed several lines of firmware text, then a grey frame, and the board
+returned to Android after the bootloader watchdog expired
+(`ro.boot.bootreason=bootloader`, no pstore records).
+
+That satisfies the "firmware output" rung of the ladder and, for the first time,
+proves the whole transport works: the bootloader jumps into BootShim, BootShim
+relocates the volume, and SEC starts.
+
+Two things this exposed:
+
+- The visible lines were SEC output only. DXE debug had been routed into the
+  Advanced Logger RAM buffer by the DSC, whose only reader is the Tools QR
+  exporter — which needs an interactive menu. A stall before the menu therefore
+  produced no observable output at all. The DebugLib override is removed so DXE
+  prints through the platform SerialPortLib to the framebuffer;
+  `AdvancedLogDxe` stays in the volume and reports "no log" until it is switched
+  back once the menu is reachable.
+- The board resets through the bootloader rather than panicking, so a hang and a
+  crash look the same from the host and both end in a stock boot.
+
+### Reaching DXE, and why the screen was unreadable
+
+Watching the framebuffer is not a usable channel before the menu: SEC writes to
+the panel directly, and the graphics driver re-takes the display during DXE, so
+that text is legible for only a couple of seconds. Lengthening the boot is not an
+acceptable fix.
+
+The first attempt drew that report through ConOut after GOP and text output were
+installed. It cleared the panel and printed nothing legible, which is
+indistinguishable from a hang, so the driver now writes pixels itself: the
+background colour encodes the furthest checkpoint reached and one black bar per
+checkpoint confirms the count. No font, no console binding and no added delay:
+
+| Background | Meaning |
+| --- | --- |
+| unchanged grey | driver did not run, or GOP was unavailable |
+| orange, 1 bar | driver ran and GOP is usable |
+| green, 2 bars | and the SEC handoff HOB is present |
+| cyan, 3 bars | and the memory map is readable, so the DXE core is fully live |
+
+Nothing is added to the boot path; the report replaces the dead grey frame that
+previously preceded the watchdog reset.
+
+With that driver in the volume the board no longer resets on the boot loader
+watchdog: it stayed off USB for over 100 seconds, where the previous build
+returned to Android at about 65 seconds. Reaching the halt means the DXE core
+dispatched, the graphics output and text output protocols were installed, and
+ConOut accepted output.
+
+### First DXE exception
+
+With the corrected `text_offset` the firmware runs far enough to dispatch DXE
+drivers and print through the console. The run ends in the default exception
+handler:
+
+```
+ERT[ArmCpuDxe]CpuExceptionHandlerLib.c(438):((BOOLEAN)(0==1))
+```
+
+That line is the `ASSERT (FALSE)` at the end of `DxeCpuExceptionHandlerLib`'s
+default handler, so an unhandled CPU exception occurred during `ArmCpuDxe`
+dispatch and the register dump precedes it. The useful fields — exception type,
+`ESR`, `ELR`, `FAR` — scrolled away under several hundred lines of DEBUG output.
+
+For the next attempt the platform debug level is restricted to errors
+(`PcdDebugPrintErrorLevel = 0x80000000`) so the exception header stays on screen.
+That is a diagnostic setting only and must be restored before the port is
+considered usable.
+
 ### Consequences for the port
 
-- Any onyx image built by the stock packer without this adjustment will appear to
-  work (`Booting OKAY`) and do nothing. This is a device-specific constraint the
-  design document did not know about.
+- Any onyx image built by the stock packer without the `text_offset` adjustment
+  reports `Booting OKAY` and does nothing. The design document did not know about
+  this constraint.
 - The correct long-term fix is a BootShim or packer option that separates "where
   the firmware goes" from "what the header advertises", rather than a post-build
-  patch.
-
-### Consequence
-
-The milestone cannot be advanced by repeating `fastboot boot`. Either the ABL
-refuses unsigned images on this board, or it jumps and faults before the first
-instruction is retired; both look identical from the host because there is no
-observable channel before DXE. Resolving it needs an early log path (UART) or an
-execution path other than `fastboot boot`, and the design's "never `fastboot
-flash`" rule means that choice belongs to the user.
+  patch; `scripts/make-menu-image.py` is the transitional implementation.
+- The board resets through the bootloader rather than panicking, so a hang and a
+  crash are indistinguishable from the host and both end in a stock boot. Any
+  further progress depends on reading firmware output from the screen.
 
 ### BootShim change made in this round
 

@@ -88,6 +88,7 @@ Mu-Silicium 侧的改动以补丁序列形式维护在 [patches/uefi](patches/ue
 | `0008` | SEC：fail-closed 的 FDT/initrd 交接守卫，先判定归属再解引用 |
 | `0009` | DSC/FDF：UniXNU 组件栈、Advanced Logger、`FdtLib`、PE 对齐 `0x1000`、`/Brepro` |
 | `0010` | BootShim 与交接守卫的主机测试 |
+| `0011` | bring-up 报告驱动：把 DXE 检查点画进帧缓冲后停住 |
 
 `0007`–`0010` 可在全新的 `Firef1yfly/Mu-Silicium` 检出上按顺序干净应用。
 
