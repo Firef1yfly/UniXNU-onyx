@@ -80,11 +80,27 @@ structural only; it does not prove dispatch, memory safety or boot.
 ## Checks
 
 ```sh
-python3 -m unittest tests.test_accept_firmware tests.test_port_policy tests.test_payload_config
+python3 -m unittest discover -s tests -p 'test_*.py'      # 203 tests; upstream-tree ones skip
+UNIXNU_UEFI=../Mu-Silicium python3 scripts/check-firmware-inputs.py
 python3 scripts/check-payload-config.py ../menu-payload/EFI/UniXNU/unixnu.toml --unixnu ../UniXNU --require-tools
 python3 scripts/check-inputs.py --unixnu ../UniXNU       # expected to fail closed
-python3 ../UniXNU/scripts/porting-record.py check --device .
+python3 ../UniXNU/scripts/porting-record.py check --device . --base origin/main
 ```
+
+`scripts/check-firmware-inputs.py` is the board's `[firmware] preflight`, so the
+official firmware step runs it too. It compares every file the series touches with
+the blob that series records for it — which catches a tree that is one patch old, a
+hand edit and a missing file — and refuses a Mu-Silicium `onyx.toml` whose
+`uefi_fd` base/size, compression or header version drifted, a `board.toml`
+compression setting that disagrees with the firmware's, and an `onyx.dsc`/`onyx.fdf`
+that lost the PE alignment, the `FdtLib` mapping, the `-DONYX_FDT_HANDOFF=1` switch
+or one of the eight required modules. Without `UNIXNU_UEFI` it skips and says so,
+because `unixnu package --check` runs it on machines with no firmware checkout.
+
+The record check is run by CI on every push, and it compares the push range against
+`origin/main`: a change that touches an owned path without updating that area's
+findings fails. `tests/test_porting_record.py` runs the same command, so that
+failure happens locally first.
 
 `check-inputs.py` failing is correct while the example gate, DRAM evidence and
 `inputs.toml` provenance are missing; do not weaken it to get a green result.
@@ -100,23 +116,36 @@ The Mu-Silicium side is carried as a series in [patches/uefi](patches/uefi):
 
 | Patch | Contents |
 | --- | --- |
-| `0001`, `0002` | historical runtime-FDT and Advanced Logger work |
-| `0003` | historical BDS platform option |
+| `0001` | BootShim: keep the runtime FDT and describe shim plus volume |
 | `0007` | BootShim: header describes shim plus FD, runtime `x0` preserved, relocation published with `dc cvac`/`dsb`/`ic iallu`/`isb`, overlap resolved by a backwards copy |
 | `0008` | SEC: fail-closed FDT/initrd handoff guard, ownership decided before any dereference |
 | `0009` | DSC/FDF: UniXNU stack, Advanced Logger, `FdtLib`, PE alignment `0x1000`, `/Brepro` |
 | `0010` | host tests for BootShim and the handoff guard |
-| `0011` | bring-up report driver: paints DXE checkpoints into the framebuffer and halts |
+| `0011` | bring-up report driver: prints the DXE checkpoints through `DEBUG` and stops the board |
+| `0012` | UniXNUDxe: direct-start fallback when BDS has no option to start (kept for its registration and markers; `0014` is what actually fires) |
+| `0013` | host tests for that boot path |
+| `0014` | `DeviceBootManagerLib`: the hand-off happens in `DeviceBootManagerAfterConsole()`, before BDS reads a load option, so `PlatformBootManagerUnableToBoot()` is unreachable while the application is present |
 
-`0007`–`0010` apply cleanly, in order, to a fresh `Firef1yfly/Mu-Silicium` checkout.
+`0002` and `0003` were withdrawn: their content now lives in `0007`, `0008` and
+`0009`. The remaining series applies cleanly, in order, to a fresh
+`Firef1yfly/Mu-Silicium` checkout and reconstructs the exact tree that built the
+accepted volume — `scripts/check-firmware-inputs.py` checks that by blob, and
+`tests/test_uefi_patch_series.py` pins which checkout each patch belongs to (`0012`
+targets the UniXNU tree, which `git apply` reaches only with `--directory=package`).
 
 ## Bring-up order
 
 1. Keep the device on `fastboot boot` only; never `fastboot flash`.
-2. Boot the menu-only image and confirm the firmware runs at all (the USB link must
-   drop; staying on `18d1:d00d` means the ABL never jumped).
-3. Reach an interactive UniXNU menu and export one Advanced Logger QR log.
-4. Only then qualify the firmware device tree, the payload volume size and the
+2. Run one attempt through [scripts/device-ladder.py](scripts/device-ladder.py):
+   `boot --image … --confirm-sha256 … --cold-restart` refuses an image that is not
+   the hash you named or whose `text_offset` is not zero, writes a record, and
+   derives its verdict from the polled device-presence sequence. A single
+   `Booting OKAY` is never a pass.
+3. Bind the panel to that record with `device-ladder.py attach --photo … --note …`,
+   so the frames that show the menu are attached to the image hash that produced
+   them instead of to a memory of the run.
+4. Reach an interactive UniXNU menu and export one Advanced Logger QR log.
+5. Only then qualify the firmware device tree, the payload volume size and the
    kernel path.
 
 The first milestone is complete when the same image hash cold-boots to an

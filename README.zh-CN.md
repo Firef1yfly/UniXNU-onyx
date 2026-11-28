@@ -67,11 +67,24 @@ FAT、英文 Unicode collation、AdvancedLogDxe。该检查只覆盖结构，**�
 ## 检查项
 
 ```sh
-python3 -m unittest tests.test_accept_firmware tests.test_port_policy tests.test_payload_config
+python3 -m unittest discover -s tests -p 'test_*.py'      # 203 项；依赖上游树的用例会跳过
+UNIXNU_UEFI=../Mu-Silicium python3 scripts/check-firmware-inputs.py
 python3 scripts/check-payload-config.py ../menu-payload/EFI/UniXNU/unixnu.toml --unixnu ../UniXNU --require-tools
 python3 scripts/check-inputs.py --unixnu ../UniXNU       # 预期失败（fail-closed）
-python3 ../UniXNU/scripts/porting-record.py check --device .
+python3 ../UniXNU/scripts/porting-record.py check --device . --base origin/main
 ```
+
+`scripts/check-firmware-inputs.py` 是 board.toml 里的 `[firmware] preflight`，官方固件
+构建步骤也会执行它。它把补丁序列涉及到的每个文件与该序列记录的 blob 逐一比对——因此
+"少打一个补丁的源码树"、"手改过的文件"、"缺失文件"都会被拒——同时拒绝这些情况：
+Mu-Silicium `onyx.toml` 的 `uefi_fd` 基址/尺寸、压缩设置或 header 版本漂移；`board.toml`
+的压缩设置与固件侧不一致；`onyx.dsc`/`onyx.fdf` 丢失 PE 对齐、`FdtLib` 映射、
+`-DONYX_FDT_HANDOFF=1` 开关或八个必需模块中的任何一个。没有 `UNIXNU_UEFI` 时它跳过并
+说明原因，因为 `unixnu package --check` 会在没有固件检出的机器上运行它。
+
+移植记录检查由 CI 在每次推送时执行，且以 `origin/main` 为基准比较推送区间：改了受管路径
+却没同步更新该领域的 findings 会直接失败。`tests/test_porting_record.py` 跑的就是同一条
+命令，所以这类失败会先在本地暴露。
 
 在示例门禁、DRAM 证据与 `inputs.toml` 来源证明补齐之前，`check-inputs.py` 失败是
 **正确**的；不要为了得到一个绿灯结果而放宽它。
@@ -86,23 +99,32 @@ Mu-Silicium 侧的改动以补丁序列形式维护在 [patches/uefi](patches/ue
 
 | 补丁 | 内容 |
 | --- | --- |
-| `0001`、`0002` | 历史遗留的运行时 FDT 与 Advanced Logger 工作 |
-| `0003` | 历史遗留的 BDS 平台选项 |
+| `0001` | BootShim：保留运行时 FDT，header 描述 shim+卷 |
 | `0007` | BootShim：header 描述 shim+FD、保留运行时 `x0`、用 `dc cvac`/`dsb`/`ic iallu`/`isb` 发布重定位后的指令、重叠拷贝改为反向复制 |
 | `0008` | SEC：fail-closed 的 FDT/initrd 交接守卫，先判定归属再解引用 |
 | `0009` | DSC/FDF：UniXNU 组件栈、Advanced Logger、`FdtLib`、PE 对齐 `0x1000`、`/Brepro` |
 | `0010` | BootShim 与交接守卫的主机测试 |
-| `0011` | bring-up 报告驱动：把 DXE 检查点画进帧缓冲后停住 |
+| `0011` | bring-up 报告驱动：用 `DEBUG` 输出 DXE 检查点后停住板子 |
+| `0012` | UniXNUDxe：BDS 无启动项时的直接启动兜底（保留其注册与标记；真正生效的是 `0014`） |
+| `0013` | 上述启动路径的主机测试 |
+| `0014` | `DeviceBootManagerLib`：交棒发生在 `DeviceBootManagerAfterConsole()`，早于 BDS 读取任何启动项，只要应用在卷里，`PlatformBootManagerUnableToBoot()` 就不可达 |
 
-`0007`–`0010` 可在全新的 `Firef1yfly/Mu-Silicium` 检出上按顺序干净应用。
+`0002`、`0003` 已撤回，内容并入 `0007`、`0008`、`0009`。其余序列可在全新的
+`Firef1yfly/Mu-Silicium` 检出上按顺序干净应用，并精确重建出产出"已验收固件卷"的那棵树
+——`scripts/check-firmware-inputs.py` 用 blob 校验这一点，`tests/test_uefi_patch_series.py`
+固定每个补丁归属哪个检出（`0012` 作用于 UniXNU 树，`git apply` 必须带 `--directory=package`）。
 
 ## 推进顺序
 
 1. 设备只使用 `fastboot boot`，**绝不 `fastboot flash`**。
-2. 启动 menu-only 镜像，先确认固件到底有没有跑起来（USB 必须出现断开；若一直停在
-   `18d1:d00d`，说明 ABL 根本没有跳转）。
-3. 进入可交互的 UniXNU 菜单，并导出一次 Advanced Logger 的二维码日志。
-4. 之后才去质证固件设备树、载荷卷大小与内核路径。
+2. 每次上机都走 [scripts/device-ladder.py](scripts/device-ladder.py)：
+   `boot --image … --confirm-sha256 … --cold-restart` 会拒绝哈希不符或 `text_offset`
+   不为零的镜像，写出记录，并根据轮询到的设备在位序列给出判定。单次 `Booting OKAY`
+   **从不**算通过。
+3. 用 `device-ladder.py attach --photo … --note …` 把面板照片绑到那条记录上，让"菜单出现"
+   的画面与产出它的镜像哈希绑定，而不是与记忆中的某次运行绑定。
+4. 进入可交互的 UniXNU 菜单，并导出一次 Advanced Logger 的二维码日志。
+5. 之后才去质证固件设备树、载荷卷大小与内核路径。
 
 第一个里程碑的完成标准：同一镜像哈希连续三次冷启动进入可交互菜单，且每次都保存了
 日志。
