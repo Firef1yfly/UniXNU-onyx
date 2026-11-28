@@ -1,0 +1,1205 @@
+# onyx port 0013: host tests for the Dxe boot path and its fallback
+#
+# Scope: mock boot/runtime services for UniXNUDxe.c, compiled on the host with
+#   no EDK2 build. Pins: the primary Boot#### path stays primary, the fallback
+#   arms only on a missing volume device path or a failed SetVariable, it
+#   starts exactly once when events are signalled twice, and every branch prints
+#   an "ONYX-BOOT: " DEBUG line.
+# Limits: synthetic volume and image bytes; no hardware evidence and no
+#   statement about what BDS really does on onyx.
+diff --git a/Tests/OnyxBootPath/onyx_boot_path_mock.c b/Tests/OnyxBootPath/onyx_boot_path_mock.c
+new file mode 100644
+index 0000000..4eed132
+--- /dev/null
++++ b/Tests/OnyxBootPath/onyx_boot_path_mock.c
+@@ -0,0 +1,758 @@
++/* Host mocks for UniXNUPkg/Driver/UniXNUDxe/UniXNUDxe.c. Test-only.
++ *
++ * The firmware volume, its device path and the application image bytes are
++ * synthetic. Counters and the DEBUG log are exported so the Python tests can
++ * assert what the driver actually did.
++ */
++#include "onyx_boot_path_shim.h"
++
++#include <stdarg.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#define MOCK_LOG_LINES  64
++#define MOCK_LOG_WIDTH  256
++#define MOCK_MAX_EVENTS 8
++
++/* --- control surface (read/written by the Python tests) ------------------ */
++
++BOOLEAN     gMockApplicationInFv   = TRUE;
++BOOLEAN     gMockFvHasDevicePath   = TRUE;
++BOOLEAN     gMockFailBootOption    = FALSE;
++BOOLEAN     gMockFailBootOrder     = FALSE;
++BOOLEAN     gMockLoadImageSawImage = FALSE;
++/* Simulates a store that already lists our option: reads report it. */
++BOOLEAN     gMockBootOrderReportsOption = FALSE;
++UINT16      gMockBootOptionNumber       = 0;
++UINTN       gMockLoadImageCount    = 0;
++UINTN       gMockStartImageCount   = 0;
++UINTN       gMockReadSectionCount  = 0;
++UINTN       gMockReadFileCount     = 0;
++UINTN       gMockSetVariableCount  = 0;
++EFI_STATUS  gMockStartImageStatus  = EFI_SUCCESS;
++
++/* --- GUIDs --------------------------------------------------------------- */
++
++EFI_GUID  gEfiGlobalVariableGuid = {
++  0x8BE4DF61, 0x93CA, 0x11D2, { 0xAA, 0x0D, 0x00, 0xE0, 0x98, 0x03, 0x2B, 0x8C }
++};
++EFI_GUID  gEfiFirmwareVolume2ProtocolGuid = {
++  0x220E73B6, 0x6BDB, 0x4413, { 0x84, 0x05, 0xB9, 0x74, 0xB1, 0x08, 0x61, 0x9A }
++};
++EFI_GUID  gEfiLoadedImageProtocolGuid = {
++  0x5B1B31A1, 0x9562, 0x11D2, { 0x8E, 0x3F, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B }
++};
++EFI_GUID  gEfiEndOfDxeEventGroupGuid = {
++  0x02CE967A, 0xDD7E, 0x4FFC, { 0x9E, 0xE7, 0x81, 0x0C, 0xF0, 0x4F, 0x05, 0x08 }
++};
++EFI_GUID  gEfiEventReadyToBootGuid = {
++  0x7CE88FB3, 0x4BD7, 0x4679, { 0x87, 0xA8, 0xA8, 0xD8, 0xDE, 0xE5, 0x0D, 0x2B }
++};
++/* Stands in for gUniXNUPkgTokenSpaceGuid.PcdUniXNUApplicationFile. */
++EFI_GUID  gMockApplicationFileGuid = {
++  0x10000000, 0x0000, 0x4000, { 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03 }
++};
++
++/* --- synthetic volume and image ------------------------------------------ */
++
++STATIC UINT8  mFvTag;
++STATIC UINT8  mImageTag;
++STATIC UINT8  mApplicationTag;
++
++/* "MZ" plus filler: the driver must move exactly these bytes into LoadImage. */
++STATIC UINT8  mImage[24] = {
++  0x4D, 0x5A, 0x90, 0x00, 0x03, 0x00, 0x00, 0x00,
++  0x04, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0x00, 0x00,
++  0x4F, 0x4E, 0x59, 0x58, 0x50, 0x45, 0x33, 0x32
++};
++
++STATIC EFI_DEVICE_PATH_PROTOCOL  mVolumePath = { 0x03, 0x0A, { 0x10, 0x00 } };
++STATIC UINT8                     mFullPath[32];
++
++STATIC EFI_LOADED_IMAGE_PROTOCOL  mLoadedImage;
++STATIC EFI_FIRMWARE_VOLUME2_PROTOCOL  mVolume;
++
++/* --- DEBUG log ----------------------------------------------------------- */
++
++STATIC CHAR8  mLog[MOCK_LOG_LINES][MOCK_LOG_WIDTH];
++STATIC UINTN  mLogCount;
++
++/* --- events -------------------------------------------------------------- */
++
++typedef struct {
++  CONST EFI_GUID     *Group;
++  EFI_EVENT_NOTIFY   Notify;
++} MOCK_EVENT;
++
++STATIC MOCK_EVENT  mEvents[MOCK_MAX_EVENTS];
++STATIC UINTN       mEventCount;
++
++/* --- helpers ------------------------------------------------------------- */
++
++STATIC
++BOOLEAN
++GuidEquals (
++  IN CONST EFI_GUID  *A,
++  IN CONST EFI_GUID  *B
++  )
++{
++  return (memcmp (A, B, sizeof (EFI_GUID)) == 0) ? TRUE : FALSE;
++}
++
++STATIC
++VOID
++LogAppend (
++  IN OUT CHAR8  *Line,
++  IN OUT UINTN  *Used,
++  IN CONST CHAR8  *Text
++  )
++{
++  while ((*Text != '\0') && (*Used < MOCK_LOG_WIDTH - 1)) {
++    Line[(*Used)++] = *Text++;
++  }
++}
++
++VOID
++OnyxBootHostDebug (
++  IN UINT32       Level,
++  IN CONST CHAR8  *Format,
++  ...
++  )
++{
++  CHAR8        line[MOCK_LOG_WIDTH];
++  UINTN        used;
++  CONST CHAR8  *P;
++  CHAR8        scratch[96];
++  va_list      Args;
++
++  (VOID)Level;
++  if (mLogCount >= MOCK_LOG_LINES) {
++    return;
++  }
++
++  used = 0;
++  va_start (Args, Format);
++  for (P = Format; (*P != '\0') && (used < MOCK_LOG_WIDTH - 1); P++) {
++    if (*P != '%') {
++      line[used++] = *P;
++      continue;
++    }
++
++    P++;
++    switch (*P) {
++      case '\0':
++        P--;
++        break;
++      case '%':
++        line[used++] = '%';
++        break;
++      case 'a':
++        LogAppend (line, &used, va_arg (Args, CONST CHAR8 *));
++        break;
++      case 's':
++        {
++          CONST CHAR16  *Wide;
++          size_t        Index;
++
++          Wide = va_arg (Args, CONST CHAR16 *);
++          for (Index = 0; (Wide != NULL) && (Wide[Index] != 0); Index++) {
++            if (used >= MOCK_LOG_WIDTH - 1) {
++              break;
++            }
++
++            line[used++] = (CHAR8)((Wide[Index] < 0x80) ? Wide[Index] : '?');
++          }
++        }
++        break;
++      case 'g':
++        {
++          CONST EFI_GUID  *Guid;
++
++          Guid = va_arg (Args, CONST EFI_GUID *);
++          snprintf (
++                   scratch, sizeof (scratch), "{%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x}",
++                   Guid->Data1, Guid->Data2, Guid->Data3,
++                   Guid->Data4[0], Guid->Data4[1], Guid->Data4[2], Guid->Data4[3],
++                   Guid->Data4[4], Guid->Data4[5], Guid->Data4[6], Guid->Data4[7]
++                   );
++          LogAppend (line, &used, scratch);
++        }
++        break;
++      case 'r':
++        {
++          UINT64  Status;
++
++          Status = va_arg (Args, UINT64);
++          snprintf (scratch, sizeof (scratch), "%s 0x%llx", EFI_ERROR (Status) ? "EFI_STATUS error" : "EFI_SUCCESS", (unsigned long long)Status);
++          LogAppend (line, &used, scratch);
++        }
++        break;
++      case 'x':
++      case 'X':
++        {
++          UINT64  Value;
++
++          Value = va_arg (Args, UINT64);
++          snprintf (scratch, sizeof (scratch), "0x%llx", (unsigned long long)Value);
++          LogAppend (line, &used, scratch);
++        }
++        break;
++      case 'd':
++        {
++          UINT64  Value;
++
++          Value = va_arg (Args, UINT64);
++          snprintf (scratch, sizeof (scratch), "%llu", (unsigned long long)Value);
++          LogAppend (line, &used, scratch);
++        }
++        break;
++      case 'p':
++        {
++          VOID  *Value;
++
++          Value = va_arg (Args, VOID *);
++          snprintf (scratch, sizeof (scratch), "%p", Value);
++          LogAppend (line, &used, scratch);
++        }
++        break;
++      default:
++        line[used++] = '%';
++        line[used++] = *P;
++        break;
++    }
++  }
++
++  va_end (Args);
++  line[used] = '\0';
++  memcpy (mLog[mLogCount], line, used + 1);
++  mLogCount++;
++}
++
++/* --- library stand-ins --------------------------------------------------- */
++
++VOID
++EfiInitializeFwVolDevicepathNode (
++  IN OUT MEDIA_FW_VOL_FILEPATH_DEVICE_PATH  *Node,
++  IN CONST EFI_GUID                         *NameGuid
++  )
++{
++  Node->Header.Type    = 0x03;
++  Node->Header.SubType = 0x06;
++  Node->Header.Length[0] = 0x14;
++  Node->Header.Length[1] = 0x00;
++  memcpy (&Node->FvNameGuid, NameGuid, sizeof (EFI_GUID));
++}
++
++EFI_DEVICE_PATH_PROTOCOL *
++DevicePathFromHandle (
++  IN EFI_HANDLE  Handle
++  )
++{
++  if (Handle != (EFI_HANDLE)&mFvTag) {
++    return NULL;
++  }
++
++  return gMockFvHasDevicePath ? &mVolumePath : NULL;
++}
++
++EFI_DEVICE_PATH_PROTOCOL *
++AppendDevicePathNode (
++  IN CONST EFI_DEVICE_PATH_PROTOCOL  *DevicePath,
++  IN CONST EFI_DEVICE_PATH_PROTOCOL  *Node
++  )
++{
++  EFI_DEVICE_PATH_PROTOCOL  *Joined;
++
++  if ((DevicePath == NULL) || (Node == NULL)) {
++    return NULL;
++  }
++
++  /* Real DevicePathLib allocates the joined path; the driver frees it. */
++  Joined = AllocateZeroPool (sizeof (mFullPath));
++  if (Joined == NULL) {
++    return NULL;
++  }
++
++  return Joined;
++}
++
++UINTN
++GetDevicePathSize (
++  IN CONST EFI_DEVICE_PATH_PROTOCOL  *DevicePath
++  )
++{
++  return (DevicePath == NULL) ? 0 : sizeof (mFullPath);
++}
++
++EFI_STATUS
++GetEfiGlobalVariable2 (
++  IN CONST CHAR16  *Name,
++  OUT VOID         **Value,
++  OUT UINTN        *Size
++  )
++{
++  UINT16  *Order;
++
++  (VOID)Name;
++  if (Value != NULL) {
++    *Value = NULL;
++  }
++
++  if (Size != NULL) {
++    *Size = 0;
++  }
++
++  /* Empty variable store: no Boot####. BootOrder is reported only when the
++   * test asks for the "option was already registered" state. */
++  if (gMockBootOrderReportsOption && (Name != NULL) && (wcscmp (Name, L"BootOrder") == 0) &&
++      (Value != NULL) && (Size != NULL))
++  {
++    Order = AllocatePool (sizeof (UINT16));
++    if (Order == NULL) {
++      return EFI_OUT_OF_RESOURCES;
++    }
++
++    *Order = gMockBootOptionNumber;
++    *Value = Order;
++    *Size  = sizeof (UINT16);
++    return EFI_SUCCESS;
++  }
++
++  return EFI_NOT_FOUND;
++}
++
++UINTN
++UnicodeSPrint (
++  OUT CHAR16       *Buffer,
++  IN UINTN         BufferSize,
++  IN CONST CHAR16  *Format,
++  ...
++  )
++{
++  va_list  Args;
++  int      Written;
++
++  va_start (Args, Format);
++  Written = swprintf (Buffer, BufferSize / sizeof (CHAR16), Format, va_arg (Args, unsigned int));
++  va_end (Args);
++  return (Written < 0) ? 0 : (UINTN)Written;
++}
++
++VOID *
++AllocatePool (
++  IN UINTN  Size
++  )
++{
++  return malloc (Size);
++}
++
++VOID *
++AllocateZeroPool (
++  IN UINTN  Size
++  )
++{
++  return calloc (1, Size);
++}
++
++VOID
++FreePool (
++  IN VOID  *Buffer
++  )
++{
++  free (Buffer);
++}
++
++VOID *
++CopyMem (
++  IN VOID         *Destination,
++  IN CONST VOID   *Source,
++  IN UINTN        Length
++  )
++{
++  return memcpy (Destination, Source, Length);
++}
++
++INTN
++CompareMem (
++  IN CONST VOID  *Destination,
++  IN CONST VOID  *Source,
++  IN UINTN       Length
++  )
++{
++  return (INTN)memcmp (Destination, Source, Length);
++}
++
++VOID
++WriteUnaligned32 (
++  OUT UINT32  *Buffer,
++  IN UINT32   Value
++  )
++{
++  memcpy (Buffer, &Value, sizeof (Value));
++}
++
++VOID
++WriteUnaligned16 (
++  OUT UINT16  *Buffer,
++  IN UINT16   Value
++  )
++{
++  memcpy (Buffer, &Value, sizeof (Value));
++}
++
++/* --- mock services ------------------------------------------------------- */
++
++STATIC
++EFI_STATUS
++EFIAPI
++MockReadFile (
++  EFI_FIRMWARE_VOLUME2_PROTOCOL  *This,
++  CONST EFI_GUID                 *NameGuid,
++  VOID                           **Buffer,
++  UINTN                          *BufferSize,
++  EFI_FV_FILETYPE                *FoundType,
++  EFI_FV_FILE_ATTRIBUTES         *FileAttributes,
++  UINT32                         *AuthenticationStatus
++  )
++{
++  (VOID)This;
++  gMockReadFileCount++;
++  if ((NameGuid == NULL) || !GuidEquals (NameGuid, &gMockApplicationFileGuid)) {
++    return EFI_NOT_FOUND;
++  }
++
++  if (!gMockApplicationInFv) {
++    return EFI_NOT_FOUND;
++  }
++
++  if (Buffer != NULL) {
++    *Buffer = NULL;
++  }
++
++  if (BufferSize != NULL) {
++    *BufferSize = sizeof (mImage);
++  }
++
++  if (FoundType != NULL) {
++    *FoundType = EFI_FV_FILETYPE_DRIVER;
++  }
++
++  if (FileAttributes != NULL) {
++    *FileAttributes = 0;
++  }
++
++  if (AuthenticationStatus != NULL) {
++    *AuthenticationStatus = 0;
++  }
++
++  return EFI_SUCCESS;
++}
++
++STATIC
++EFI_STATUS
++EFIAPI
++MockReadSection (
++  EFI_FIRMWARE_VOLUME2_PROTOCOL  *This,
++  CONST EFI_GUID                 *NameGuid,
++  UINT32                         SectionType,
++  UINTN                          SectionInstance,
++  VOID                           **Buffer,
++  UINTN                          *BufferSize,
++  UINT32                         *AuthenticationStatus
++  )
++{
++  UINT8  *Copy;
++
++  (VOID)This;
++  (VOID)SectionInstance;
++  gMockReadSectionCount++;
++  if ((NameGuid == NULL) || !GuidEquals (NameGuid, &gMockApplicationFileGuid)) {
++    return EFI_NOT_FOUND;
++  }
++
++  if (!gMockApplicationInFv) {
++    return EFI_NOT_FOUND;
++  }
++
++  if (SectionType != EFI_SECTION_PE32) {
++    return EFI_NOT_FOUND;
++  }
++
++  Copy = AllocatePool (sizeof (mImage));
++  if (Copy == NULL) {
++    return EFI_OUT_OF_RESOURCES;
++  }
++
++  memcpy (Copy, mImage, sizeof (mImage));
++  *Buffer   = Copy;
++  *BufferSize = sizeof (mImage);
++  if (AuthenticationStatus != NULL) {
++    *AuthenticationStatus = 0;
++  }
++
++  return EFI_SUCCESS;
++}
++
++STATIC
++EFI_STATUS
++EFIAPI
++MockHandleProtocol (
++  IN EFI_HANDLE       Handle,
++  IN CONST EFI_GUID   *Protocol,
++  OUT VOID            **Interface
++  )
++{
++  if (Handle == (EFI_HANDLE)&mFvTag) {
++    if (GuidEquals (Protocol, &gEfiFirmwareVolume2ProtocolGuid)) {
++      *Interface = &mVolume;
++      return EFI_SUCCESS;
++    }
++
++    if (GuidEquals (Protocol, &gEfiLoadedImageProtocolGuid)) {
++      *Interface = &mLoadedImage;
++      return EFI_SUCCESS;
++    }
++  }
++
++  return EFI_UNSUPPORTED;
++}
++
++STATIC
++EFI_STATUS
++EFIAPI
++MockLocateHandleBuffer (
++  IN EFI_LOCATE_SEARCH_TYPE  SearchType,
++  IN CONST EFI_GUID          *Protocol,
++  IN VOID                    *SearchKey,
++  OUT UINTN                  *NoHandles,
++  OUT EFI_HANDLE             **Buffer
++  )
++{
++  EFI_HANDLE  *Handles;
++
++  (VOID)SearchType;
++  (VOID)SearchKey;
++  if (!GuidEquals (Protocol, &gEfiFirmwareVolume2ProtocolGuid)) {
++    return EFI_NOT_FOUND;
++  }
++
++  Handles = AllocatePool (sizeof (EFI_HANDLE));
++  if (Handles == NULL) {
++    return EFI_OUT_OF_RESOURCES;
++  }
++
++  Handles[0] = (EFI_HANDLE)&mFvTag;
++  *NoHandles = 1;
++  *Buffer    = Handles;
++  return EFI_SUCCESS;
++}
++
++STATIC
++EFI_STATUS
++EFIAPI
++MockCreateEventEx (
++  IN UINT32             Type,
++  IN EFI_TPL            NotifyTpl,
++  IN EFI_EVENT_NOTIFY   NotifyFunction,
++  IN CONST VOID         *NotifyContext,
++  IN CONST EFI_GUID     *EventGroup,
++  OUT EFI_EVENT         *Event
++  )
++{
++  (VOID)NotifyTpl;
++  (VOID)NotifyContext;
++  if ((EventGroup == NULL) || (mEventCount >= MOCK_MAX_EVENTS)) {
++    return EFI_OUT_OF_RESOURCES;
++  }
++
++  mEvents[mEventCount].Group  = EventGroup;
++  mEvents[mEventCount].Notify = NotifyFunction;
++  mEventCount++;
++  if (Event != NULL) {
++    *Event = (EFI_EVENT)&mImageTag;
++  }
++
++  (VOID)Type;
++  return EFI_SUCCESS;
++}
++
++STATIC
++EFI_STATUS
++EFIAPI
++MockLoadImage (
++  IN BOOLEAN                    BootPolicy,
++  IN EFI_HANDLE                 ParentImageHandle,
++  IN EFI_DEVICE_PATH_PROTOCOL   *DevicePath,
++  IN VOID                       *SourceBuffer,
++  IN UINTN                      SourceSize,
++  OUT EFI_HANDLE                *ImageHandle
++  )
++{
++  gMockLoadImageCount++;
++  if ((SourceBuffer != NULL) && (SourceSize == sizeof (mImage)) &&
++      (memcmp (SourceBuffer, mImage, sizeof (mImage)) == 0))
++  {
++    gMockLoadImageSawImage = TRUE;
++  }
++
++  (VOID)BootPolicy;
++  (VOID)ParentImageHandle;
++  (VOID)DevicePath;
++  if (ImageHandle != NULL) {
++    *ImageHandle = (EFI_HANDLE)&mApplicationTag;
++  }
++
++  return EFI_SUCCESS;
++}
++
++STATIC
++EFI_STATUS
++EFIAPI
++MockStartImage (
++  IN EFI_HANDLE  ImageHandle,
++  OUT UINTN      *ExitDataSize,
++  OUT CHAR16     **ExitData
++  )
++{
++  gMockStartImageCount++;
++  (VOID)ImageHandle;
++  (VOID)ExitDataSize;
++  (VOID)ExitData;
++  return gMockStartImageStatus;
++}
++
++STATIC
++EFI_STATUS
++EFIAPI
++MockSetVariable (
++  IN CONST CHAR16    *VariableName,
++  IN CONST EFI_GUID  *VendorGuid,
++  IN UINT32          Attributes,
++  IN UINTN           DataSize,
++  IN VOID            *Data
++  )
++{
++  (VOID)VendorGuid;
++  (VOID)Attributes;
++  (VOID)DataSize;
++  (VOID)Data;
++  gMockSetVariableCount++;
++  if ((wcscmp (VariableName, L"BootOrder") == 0) && gMockFailBootOrder) {
++    return EFI_DEVICE_ERROR;
++  }
++
++  if ((wcsncmp (VariableName, L"Boot", 4) == 0) && (wcscmp (VariableName, L"BootOrder") != 0)) {
++    if (gMockFailBootOption) {
++      return EFI_OUT_OF_RESOURCES;
++    }
++
++    /* Remember the number so a later BootOrder read can report it. */
++    gMockBootOptionNumber = (UINT16)wcstoul (&VariableName[4], NULL, 16);
++  }
++
++  return EFI_SUCCESS;
++}
++
++STATIC EFI_BOOT_SERVICES  mBootServices = {
++  MockHandleProtocol,
++  MockLocateHandleBuffer,
++  MockCreateEventEx,
++  MockLoadImage,
++  MockStartImage
++};
++
++STATIC EFI_RUNTIME_SERVICES  mRuntimeServices = {
++  MockSetVariable
++};
++
++EFI_BOOT_SERVICES           *gBS = &mBootServices;
++EFI_RUNTIME_SERVICES        *gRT = &mRuntimeServices;
++/* The driver image is loaded from the same volume as the application. */
++EFI_HANDLE                  gImageHandle = (EFI_HANDLE)&mFvTag;
++
++/* --- exported controls --------------------------------------------------- */
++
++UINTN
++OnyxMockLogCount (
++  VOID
++  )
++{
++  return mLogCount;
++}
++
++CONST CHAR8 *
++OnyxMockLogLine (
++  UINTN  Index
++  )
++{
++  return (Index < mLogCount) ? mLog[Index] : "";
++}
++
++BOOLEAN
++OnyxMockSignal (
++  IN CONST EFI_GUID  *Group
++  )
++{
++  UINTN      Index;
++  BOOLEAN    Signalled;
++
++  Signalled = FALSE;
++  for (Index = 0; Index < mEventCount; Index++) {
++    if (GuidEquals (mEvents[Index].Group, Group) && (mEvents[Index].Notify != NULL)) {
++      mEvents[Index].Notify ((EFI_EVENT)&mImageTag, NULL);
++      Signalled = TRUE;
++    }
++  }
++
++  return Signalled;
++}
++
++BOOLEAN
++OnyxMockSignalEndOfDxe (
++  VOID
++  )
++{
++  return OnyxMockSignal (&gEfiEndOfDxeEventGroupGuid);
++}
++
++BOOLEAN
++OnyxMockSignalReadyToBoot (
++  VOID
++  )
++{
++  return OnyxMockSignal (&gEfiEventReadyToBootGuid);
++}
++
++VOID
++OnyxMockReset (
++  VOID
++  )
++{
++  mLoadedImage.Revision     = 0x00010000;
++  mLoadedImage.ParentHandle = NULL;
++  mLoadedImage.SystemTable  = NULL;
++  mLoadedImage.DeviceHandle = (EFI_HANDLE)&mFvTag;
++
++  mVolume.ReadFile    = MockReadFile;
++  mVolume.ReadSection = MockReadSection;
++
++  mEventCount = 0;
++  mLogCount    = 0;
++  memset (mLog, 0, sizeof (mLog));
++  memset (mFullPath, 0, sizeof (mFullPath));
++
++  gMockApplicationInFv   = TRUE;
++  gMockFvHasDevicePath   = TRUE;
++  gMockFailBootOption    = FALSE;
++  gMockFailBootOrder     = FALSE;
++  gMockLoadImageSawImage      = FALSE;
++  gMockBootOrderReportsOption = FALSE;
++  gMockBootOptionNumber       = 0;
++  gMockLoadImageCount    = 0;
++  gMockStartImageCount   = 0;
++  gMockReadSectionCount  = 0;
++  gMockReadFileCount     = 0;
++  gMockSetVariableCount  = 0;
++  gMockStartImageStatus  = EFI_SUCCESS;
++}
+diff --git a/Tests/OnyxBootPath/onyx_boot_path_shim.h b/Tests/OnyxBootPath/onyx_boot_path_shim.h
+new file mode 100644
+index 0000000..0aef37e
+--- /dev/null
++++ b/Tests/OnyxBootPath/onyx_boot_path_shim.h
+@@ -0,0 +1,194 @@
++/* Host stand-ins for the EDK II surface UniXNUDxe.c uses.
++ *
++ * Test-only: it lets the real driver code (UniXNUPkg/Driver/UniXNUDxe/
++ * UniXNUDxe.c) run on the host against mock boot/runtime services. None of
++ * this is firmware code and none of it is compiled into the firmware: the
++ * driver's #include block is skipped with -DONYX_BOOT_PATH_HOST and this
++ * header arrives through -include.
++ *
++ * The firmware volume, the application image bytes and every handle here are
++ * synthetic. Nothing in this file is onyx hardware evidence.
++ */
++#ifndef ONYX_BOOT_PATH_SHIM_H_
++#define ONYX_BOOT_PATH_SHIM_H_
++
++#include <stddef.h>
++#include <stdint.h>
++#include <wchar.h>
++
++typedef void           VOID;
++typedef uint8_t        UINT8;
++typedef uint16_t       UINT16;
++typedef uint32_t       UINT32;
++typedef uint64_t       UINT64;
++typedef int16_t        INT16;
++typedef int32_t        INT32;
++typedef int64_t        INTN;
++typedef uint64_t       UINTN;
++typedef char           CHAR8;
++/* L"..." literals are wchar_t* on the host, so CHAR16 follows wchar_t. */
++typedef wchar_t        CHAR16;
++typedef unsigned char  BOOLEAN;
++typedef uint64_t       EFI_STATUS;
++typedef void          *EFI_HANDLE;
++typedef void          *EFI_EVENT;
++typedef uint64_t       EFI_TPL;
++typedef uint8_t        EFI_FV_FILETYPE;
++typedef uint32_t       EFI_FV_FILE_ATTRIBUTES;
++typedef uint32_t       EFI_LOCATE_SEARCH_TYPE;
++typedef struct EFI_SYSTEM_TABLE_  EFI_SYSTEM_TABLE;
++
++typedef struct {
++  UINT32  Data1;
++  UINT16  Data2;
++  UINT16  Data3;
++  UINT8   Data4[8];
++} EFI_GUID;
++
++typedef struct {
++  UINT8  Type;
++  UINT8  SubType;
++  UINT8  Length[2];
++} EFI_DEVICE_PATH_PROTOCOL;
++
++typedef struct {
++  EFI_DEVICE_PATH_PROTOCOL  Header;
++  EFI_GUID                  FvNameGuid;
++} MEDIA_FW_VOL_FILEPATH_DEVICE_PATH;
++
++#define CONST  const
++#define STATIC static
++#define IN
++#define OUT
++#define EFIAPI
++#define TRUE   1
++#define FALSE  0
++
++#define EFI_SUCCESS               0ULL
++#define EFI_INVALID_PARAMETER     0x8000000000000002ULL
++#define EFI_UNSUPPORTED           0x8000000000000003ULL
++#define EFI_DEVICE_ERROR          0x8000000000000007ULL
++#define EFI_OUT_OF_RESOURCES      0x8000000000000009ULL
++#define EFI_NOT_FOUND             0x800000000000000EULL
++#define EFI_ALREADY_STARTED       0x8000000000000011ULL
++#define EFI_SECURITY_VIOLATION    0x800000000000001AULL
++#define EFI_ERROR(Status)         (((EFI_STATUS)(Status) & 0x8000000000000000ULL) != 0)
++
++#define ByProtocol                2
++#define EVT_NOTIFY_SIGNAL         0x00000200U
++#define TPL_CALLBACK              8
++#define LOAD_OPTION_ACTIVE        0x00000001U
++#define EFI_SECTION_PE32          0x10
++#define EFI_FV_FILETYPE_DRIVER    0x07
++#define EFI_BOOT_ORDER_VARIABLE_NAME  L"BootOrder"
++
++#define EFI_VARIABLE_NON_VOLATILE        0x00000001U
++#define EFI_VARIABLE_BOOTSERVICE_ACCESS  0x00000002U
++#define EFI_VARIABLE_RUNTIME_ACCESS      0x00000004U
++
++#define DEBUG_ERROR  0x80000000U
++#define DEBUG_WARN   0x00000002U
++#define DEBUG_INFO   0x00000040U
++#define DEBUG(Expression)  OnyxBootHostDebug Expression
++
++typedef VOID (EFIAPI *EFI_EVENT_NOTIFY)(IN EFI_EVENT Event, IN VOID *Context);
++
++typedef struct _EFI_FIRMWARE_VOLUME2_PROTOCOL {
++  EFI_STATUS (EFIAPI *ReadFile)(
++    struct _EFI_FIRMWARE_VOLUME2_PROTOCOL  *This,
++    CONST EFI_GUID                         *NameGuid,
++    VOID                                   **Buffer,
++    UINTN                                  *BufferSize,
++    EFI_FV_FILETYPE                        *FoundType,
++    EFI_FV_FILE_ATTRIBUTES                 *FileAttributes,
++    UINT32                                 *AuthenticationStatus
++    );
++  EFI_STATUS (EFIAPI *ReadSection)(
++    struct _EFI_FIRMWARE_VOLUME2_PROTOCOL  *This,
++    CONST EFI_GUID                         *NameGuid,
++    UINT32                                 SectionType,
++    UINTN                                  SectionInstance,
++    VOID                                   **Buffer,
++    UINTN                                  *BufferSize,
++    UINT32                                 *AuthenticationStatus
++    );
++} EFI_FIRMWARE_VOLUME2_PROTOCOL;
++
++typedef struct {
++  UINT32      Revision;
++  EFI_HANDLE  ParentHandle;
++  VOID        *SystemTable;
++  EFI_HANDLE  DeviceHandle;
++} EFI_LOADED_IMAGE_PROTOCOL;
++
++typedef struct {
++  EFI_STATUS (EFIAPI *HandleProtocol)(IN EFI_HANDLE Handle, IN CONST EFI_GUID *Protocol, OUT VOID **Interface);
++  EFI_STATUS (EFIAPI *LocateHandleBuffer)(
++    IN EFI_LOCATE_SEARCH_TYPE SearchType,
++    IN CONST EFI_GUID        *Protocol,
++    IN VOID                  *SearchKey,
++    OUT UINTN                *NoHandles,
++    OUT EFI_HANDLE           **Buffer
++    );
++  EFI_STATUS (EFIAPI *CreateEventEx)(
++    IN UINT32             Type,
++    IN EFI_TPL            NotifyTpl,
++    IN EFI_EVENT_NOTIFY   NotifyFunction,
++    IN CONST VOID         *NotifyContext,
++    IN CONST EFI_GUID     *EventGroup,
++    OUT EFI_EVENT         *Event
++    );
++  EFI_STATUS (EFIAPI *LoadImage)(
++    IN BOOLEAN                    BootPolicy,
++    IN EFI_HANDLE                 ParentImageHandle,
++    IN EFI_DEVICE_PATH_PROTOCOL   *DevicePath,
++    IN VOID                       *SourceBuffer,
++    IN UINTN                      SourceSize,
++    OUT EFI_HANDLE                *ImageHandle
++    );
++  EFI_STATUS (EFIAPI *StartImage)(IN EFI_HANDLE ImageHandle, OUT UINTN *ExitDataSize, OUT CHAR16 **ExitData);
++} EFI_BOOT_SERVICES;
++
++typedef struct {
++  EFI_STATUS (EFIAPI *SetVariable)(
++    IN CONST CHAR16    *VariableName,
++    IN CONST EFI_GUID  *VendorGuid,
++    IN UINT32          Attributes,
++    IN UINTN           DataSize,
++    IN VOID            *Data
++    );
++} EFI_RUNTIME_SERVICES;
++
++extern EFI_BOOT_SERVICES   *gBS;
++extern EFI_RUNTIME_SERVICES *gRT;
++extern EFI_HANDLE          gImageHandle;
++
++/* The mock owns the GUID objects the driver compares against. */
++extern EFI_GUID  gEfiGlobalVariableGuid;
++extern EFI_GUID  gEfiFirmwareVolume2ProtocolGuid;
++extern EFI_GUID  gEfiLoadedImageProtocolGuid;
++extern EFI_GUID  gEfiEndOfDxeEventGroupGuid;
++extern EFI_GUID  gEfiEventReadyToBootGuid;
++extern EFI_GUID  gMockApplicationFileGuid;
++
++/* PcdLib: the application file GUID is the only PCD the driver reads. */
++#define PcdUniXNUApplicationFile  (&gMockApplicationFileGuid)
++#define PcdGetPtr(Token)          ((VOID *)(Token))
++
++/* Library classes, implemented by onyx_boot_path_mock.c. */
++VOID                       EfiInitializeFwVolDevicepathNode (IN OUT MEDIA_FW_VOL_FILEPATH_DEVICE_PATH *Node, IN CONST EFI_GUID *NameGuid);
++EFI_DEVICE_PATH_PROTOCOL  *DevicePathFromHandle (IN EFI_HANDLE Handle);
++EFI_DEVICE_PATH_PROTOCOL  *AppendDevicePathNode (IN CONST EFI_DEVICE_PATH_PROTOCOL *DevicePath, IN CONST EFI_DEVICE_PATH_PROTOCOL *Node);
++UINTN                      GetDevicePathSize (IN CONST EFI_DEVICE_PATH_PROTOCOL *DevicePath);
++EFI_STATUS                 GetEfiGlobalVariable2 (IN CONST CHAR16 *Name, OUT VOID **Value, OUT UINTN *Size);
++UINTN                      UnicodeSPrint (OUT CHAR16 *Buffer, IN UINTN BufferSize, IN CONST CHAR16 *Format, ...);
++VOID                      *AllocatePool (IN UINTN Size);
++VOID                      *AllocateZeroPool (IN UINTN Size);
++VOID                       FreePool (IN VOID *Buffer);
++VOID                      *CopyMem (IN VOID *Destination, IN CONST VOID *Source, IN UINTN Length);
++INTN                       CompareMem (IN CONST VOID *Destination, IN CONST VOID *Source, IN UINTN Length);
++VOID                       WriteUnaligned32 (OUT UINT32 *Buffer, IN UINT32 Value);
++VOID                       WriteUnaligned16 (OUT UINT16 *Buffer, IN UINT16 Value);
++VOID                       OnyxBootHostDebug (IN UINT32 Level, IN CONST CHAR8 *Format, ...);
++
++#endif /* ONYX_BOOT_PATH_SHIM_H_ */
+diff --git a/Tests/OnyxBootPath/test_onyx_boot_path.py b/Tests/OnyxBootPath/test_onyx_boot_path.py
+new file mode 100644
+index 0000000..5c670ef
+--- /dev/null
++++ b/Tests/OnyxBootPath/test_onyx_boot_path.py
+@@ -0,0 +1,226 @@
++#!/usr/bin/env python3
++"""Host tests for UniXNUPkg/Driver/UniXNUDxe/UniXNUDxe.c.
++
++The real driver source is compiled on the host against mock boot and runtime
++services (see onyx_boot_path_shim.h) and driven through ctypes. The firmware
++volume, its device path and the application image bytes are synthetic; nothing
++here is onyx hardware evidence and no EDK II build is involved.
++
++What is pinned here is the boot-path contract that BDS depends on:
++
++* the primary path (Boot#### + BootOrder) stays the primary path,
++* the direct-start fallback is armed only when that path cannot be trusted
++  (no volume device path, or a failed SetVariable),
++* the fallback starts the image exactly once, on ReadyToBoot, and never when
++  registration succeeded,
++* the fallback stands down when BootOrder turns out to list our own option
++  anyway, because BDS signals ReadyToBoot immediately before it starts one,
++* every branch reports through a DEBUG line with the ONYX-BOOT prefix.
++"""
++import ctypes
++import itertools
++import shutil
++import subprocess
++import tempfile
++import unittest
++from pathlib import Path
++
++HERE = Path(__file__).resolve().parent
++MU = HERE.parents[1]
++SOURCE = MU / "UniXNUPkg/Driver/UniXNUDxe/UniXNUDxe.c"
++
++EFI_SUCCESS = 0
++EFI_OUT_OF_RESOURCES = 0x8000000000000009
++EFI_NOT_FOUND = 0x800000000000000E
++EFI_DEVICE_ERROR = 0x8000000000000007
++
++PREFIX = "ONYX-BOOT: "
++
++
++def build_library(target: Path) -> Path:
++    command = ["clang", "-shared", "-fPIC", "-O1", "-g", "-Werror",
++               "-DONYX_BOOT_PATH_HOST", "-I", str(HERE),
++               "-include", str(HERE / "onyx_boot_path_shim.h"),
++               str(HERE / "onyx_boot_path_mock.c"), str(SOURCE),
++               "-o", str(target)]
++    try:
++        subprocess.run(command, check=True, capture_output=True, text=True)
++    except FileNotFoundError as error:
++        raise unittest.SkipTest(f"clang unavailable: {error}") from error
++    except subprocess.CalledProcessError as error:
++        raise AssertionError(f"host build failed:\n{error.stdout}\n{error.stderr}") from error
++    return target
++
++
++class BootPathTests(unittest.TestCase):
++    @classmethod
++    def setUpClass(cls):
++        cls.temp = tempfile.TemporaryDirectory()
++        cls.addClassCleanup(cls.temp.cleanup)
++        cls.dir = Path(cls.temp.name)
++        cls.library = build_library(cls.dir / "libonyxboot.so")
++        cls.serial = itertools.count()
++        cls.bindings = cls.load(cls.library)
++
++    @staticmethod
++    def load(path: Path):
++        lib = ctypes.CDLL(str(path))
++        lib.UniXNUDxeEntry.restype = ctypes.c_uint64
++        lib.UniXNUDxeEntry.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
++        lib.OnyxMockReset.restype = None
++        lib.OnyxMockReset.argtypes = []
++        lib.OnyxMockSignalEndOfDxe.restype = ctypes.c_ubyte
++        lib.OnyxMockSignalEndOfDxe.argtypes = []
++        lib.OnyxMockSignalReadyToBoot.restype = ctypes.c_ubyte
++        lib.OnyxMockSignalReadyToBoot.argtypes = []
++        lib.OnyxMockLogCount.restype = ctypes.c_uint64
++        lib.OnyxMockLogCount.argtypes = []
++        lib.OnyxMockLogLine.restype = ctypes.c_char_p
++        lib.OnyxMockLogLine.argtypes = [ctypes.c_uint64]
++        return lib
++
++    # -- helpers ----------------------------------------------------------
++    def setUp(self):
++        # The driver's fallback flags are image-static, exactly like in
++        # firmware where it runs once per boot. A fresh copy of the library
++        # per test gives every test a pristine image instead of ordering each
++        # other's state.
++        path = self.dir / f"libonyxboot_{next(self.serial)}.so"
++        shutil.copyfile(self.library, path)
++        self.lib = self.load(path)
++        self.lib.OnyxMockReset()
++
++    def set_flag(self, name: str, value: bool):
++        ctypes.c_ubyte.in_dll(self.lib, name).value = 1 if value else 0
++
++    def counter(self, name: str) -> int:
++        return ctypes.c_uint64.in_dll(self.lib, name).value
++
++    def log(self) -> list[str]:
++        return [self.lib.OnyxMockLogLine(index).decode() for index in range(self.lib.OnyxMockLogCount())]
++
++    def entry(self) -> int:
++        return self.lib.UniXNUDxeEntry(None, None)
++
++    def assert_prefixed(self):
++        """Every line the driver emits must carry the panel-readable prefix."""
++        lines = [line for line in self.log() if line]
++        self.assertTrue(lines, "the driver emitted no DEBUG output at all")
++        for line in lines:
++            self.assertTrue(line.startswith(PREFIX), f"unprefixed DEBUG line: {line!r}")
++
++    # -- (a) volume without a device path ---------------------------------
++    def test_volume_without_device_path_arms_the_fallback(self):
++        self.set_flag("gMockFvHasDevicePath", False)
++        self.assertEqual(self.entry(), EFI_SUCCESS)
++        self.assertEqual(self.counter("gMockSetVariableCount"), 0,
++                         "no Boot#### should be written when the volume has no device path")
++        self.assertEqual(self.counter("gMockStartImageCount"), 0,
++                         "the fallback must not start anything during dispatch")
++        self.assertTrue(any("no device path" in line for line in self.log()), self.log())
++        self.assert_prefixed()
++
++        self.assertTrue(self.lib.OnyxMockSignalReadyToBoot())
++        self.assertEqual(self.counter("gMockLoadImageCount"), 1)
++        self.assertEqual(self.counter("gMockStartImageCount"), 1)
++        self.assert_prefixed()
++
++    # -- (b) SetVariable failures -----------------------------------------
++    def test_boot_option_write_failure_arms_the_fallback(self):
++        self.set_flag("gMockFailBootOption", True)
++        self.assertEqual(self.entry(), EFI_SUCCESS,
++                         "a failed Boot#### write must not fail the driver, or the fallback is unloaded")
++        self.assertEqual(self.counter("gMockSetVariableCount"), 1,
++                         "BootOrder must not be written when Boot#### failed")
++        self.assertTrue(any("cannot write Boot" in line for line in self.log()), self.log())
++
++        self.lib.OnyxMockSignalReadyToBoot()
++        self.assertEqual(self.counter("gMockStartImageCount"), 1)
++        self.assert_prefixed()
++
++    def test_boot_order_write_failure_arms_the_fallback(self):
++        self.set_flag("gMockFailBootOrder", True)
++        self.assertEqual(self.entry(), EFI_SUCCESS)
++        self.assertEqual(self.counter("gMockSetVariableCount"), 2)
++        self.assertTrue(any("BootOrder" in line and "fallback armed" in line for line in self.log()), self.log())
++
++        self.lib.OnyxMockSignalReadyToBoot()
++        self.assertEqual(self.counter("gMockStartImageCount"), 1)
++
++    def test_fallback_stands_down_when_boot_order_lists_our_option(self):
++        """A failed BootOrder write does not prove BDS will not boot us.
++
++        The option may already have been in BootOrder (this driver reuses an
++        identical Boot####). BDS signals ReadyToBoot right before it starts the
++        option, so starting here as well would run the application twice.
++        """
++        self.set_flag("gMockFailBootOrder", True)
++        self.set_flag("gMockBootOrderReportsOption", True)
++        self.assertEqual(self.entry(), EFI_SUCCESS)
++
++        self.lib.OnyxMockSignalReadyToBoot()
++        self.assertEqual(self.counter("gMockStartImageCount"), 0,
++                         "the fallback must not start an option BDS is about to start")
++        self.assertTrue(any("fallback disarmed" in line for line in self.log()), self.log())
++        self.assert_prefixed()
++
++        # and it stays stood down: a second ReadyToBoot changes nothing
++        self.lib.OnyxMockSignalReadyToBoot()
++        self.assertEqual(self.counter("gMockStartImageCount"), 0)
++
++    # -- (c) exactly once, however often the events fire ------------------
++    def test_fallback_starts_exactly_once(self):
++        self.set_flag("gMockFvHasDevicePath", False)
++        self.entry()
++        for _ in range(2):
++            self.lib.OnyxMockSignalEndOfDxe()
++            self.lib.OnyxMockSignalReadyToBoot()
++        self.assertEqual(self.counter("gMockLoadImageCount"), 1)
++        self.assertEqual(self.counter("gMockStartImageCount"), 1)
++        self.assertTrue(any("already ran" in line for line in self.log()), self.log())
++
++    # -- (d) the success path never arms the fallback ---------------------
++    def test_successful_registration_never_starts_the_application(self):
++        self.assertEqual(self.entry(), EFI_SUCCESS)
++        self.assertEqual(self.counter("gMockSetVariableCount"), 2,
++                         "Boot#### and BootOrder should both be written")
++        self.assertFalse(self.lib.OnyxMockSignalEndOfDxe(),
++                         "the success path must not hook EndOfDxe at all")
++        self.assertFalse(self.lib.OnyxMockSignalReadyToBoot(),
++                         "the success path must not hook ReadyToBoot at all")
++        self.assertEqual(self.counter("gMockLoadImageCount"), 0)
++        self.assertEqual(self.counter("gMockStartImageCount"), 0)
++        self.assertFalse(any("fallback:" in line for line in self.log()),
++                         f"the fallback took an action after a successful registration: {self.log()}")
++        self.assertTrue(any("fallback not armed" in line for line in self.log()), self.log())
++        self.assert_prefixed()
++
++    # -- the fallback loads what the FV holds -----------------------------
++    def test_fallback_loads_the_pe32_section_from_the_volume(self):
++        self.set_flag("gMockFvHasDevicePath", False)
++        self.entry()
++        self.lib.OnyxMockSignalReadyToBoot()
++        self.assertEqual(self.counter("gMockReadSectionCount"), 1,
++                         "the fallback must read the PE32 section through the FV protocol")
++        self.assertEqual(ctypes.c_ubyte.in_dll(self.lib, "gMockLoadImageSawImage").value, 1,
++                         "LoadImage must receive exactly the bytes ReadSection returned")
++
++    def test_fallback_reports_a_start_failure(self):
++        self.set_flag("gMockFvHasDevicePath", False)
++        self.entry()
++        ctypes.c_uint64.in_dll(self.lib, "gMockStartImageStatus").value = EFI_DEVICE_ERROR
++        self.lib.OnyxMockSignalReadyToBoot()
++        self.assertTrue(any("finished" in line and "0x8000000000000007" in line for line in self.log()), self.log())
++
++    # -- nothing to load --------------------------------------------------
++    def test_missing_application_is_reported_and_not_started(self):
++        self.set_flag("gMockApplicationInFv", False)
++        self.assertEqual(self.entry(), EFI_NOT_FOUND)
++        self.lib.OnyxMockSignalReadyToBoot()
++        self.assertEqual(self.counter("gMockStartImageCount"), 0)
++        self.assertTrue(any("in no firmware volume" in line for line in self.log()), self.log())
++        self.assert_prefixed()
++
++
++if __name__ == "__main__":
++    unittest.main()

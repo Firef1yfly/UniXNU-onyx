@@ -1,0 +1,359 @@
+# onyx port 0014: the platform, not BDS's option loop, owns the hand-off
+#
+# Scope: Platforms/Xiaomi/onyxPkg gains Library/DeviceBootManagerLib, and
+#   onyx.dsc maps DeviceBootManagerLib to it (the inherited instance is
+#   SiliciumNullPkg's no-op).
+# Why 0012 could not work: MdeModulePkg signals gEfiEventReadyToBootGuid from
+#   EfiBootManagerBoot() alone (Mu_Basecore BmBoot.c), i.e. only after BDS has
+#   already picked a load option. A boot in which BDS finds nothing to start
+#   therefore never signals ReadyToBoot, so the driver's fallback in 0012 stays
+#   armed and never runs - precisely the boot it was written for. That boot ends
+#   in PlatformBootManagerUnableToBoot(): BG_NO_BOOT_OS drawn over the debug
+#   console, 10 s stall, EfiResetShutdown. On this board the console renders
+#   nothing, so the only trace is the debug text, then a grey frame: the panel
+#   observation recorded in docs/TAKEOVER-UEFI.md.
+# What this patch does instead: DeviceBootManagerAfterConsole() is called from
+#   PlatformBootManagerAfterConsole() exactly once per boot, after console
+#   connect and after the disk stack is dispatched, and before BDS looks at a
+#   single load option. The library finds the firmware volume carrying the
+#   application file, reads its PE32 section, LoadImage's it from the buffer and
+#   StartImage's it. Because the application is started there, BDS never reaches
+#   its option loop and the unable-to-boot path becomes unreachable while the
+#   application is present.
+# Limits: LoadImage(TRUE, gImageHandle, NULL, ...) needs the application and BDS
+#   in the same firmware volume, as 0012 does; image authentication is unchanged.
+#   The application is started at most once per boot. If it returns, the status
+#   is printed and BDS continues with its own options - a bring-up signal, not a
+#   supported state. Unverified on hardware; no phone was attached when this was
+#   written.
+# Apply: Mu-Silicium checkout at 1d0f1e41018b2519ab9b41b60ac073453e346ba0, after
+#   0001, 0007, 0009. The library needs the UniXNUPkg mount for its PCD, but it
+#   writes nothing through it.
+diff --git a/Platforms/Xiaomi/onyxPkg/Library/DeviceBootManagerLib/DeviceBootManagerLib.c b/Platforms/Xiaomi/onyxPkg/Library/DeviceBootManagerLib/DeviceBootManagerLib.c
+new file mode 100644
+index 0000000..55a7734
+--- /dev/null
++++ b/Platforms/Xiaomi/onyxPkg/Library/DeviceBootManagerLib/DeviceBootManagerLib.c
+@@ -0,0 +1,258 @@
++/** @file
++  onyx device boot manager.
++
++  The hand-off to the UniXNU application cannot be left to the generic BDS on
++  this board:
++
++    - Boot#### registration needs a writable variable store. The platform runs
++      VariableRuntimeDxe in emulated mode, so the option exists only as long as
++      that boot lives, and any failure inside registration is silent.
++    - MdeModulePkg signals gEfiEventReadyToBootGuid only from
++      EfiBootManagerBoot(), that is, only after BDS has already picked a load
++      option. A firmware hook that waits for ReadyToBoot therefore never runs on
++      a platform whose options do not load, which is exactly the case that needs
++      the hook.
++    - When BDS ends up with nothing bootable it calls
++      PlatformBootManagerUnableToBoot(), paints the no-boot-OS graphic over the
++      debug console and shuts the board down. On this board that is the grey
++      screen, and it hides the reason the boot option did not start.
++
++  This library owns the hand-off instead, from PlatformBootManagerAfterConsole():
++  BDS calls it once per boot, after console connect and after the disk stack has
++  been dispatched, and before it looks at a single boot option. From there the
++  library finds the firmware volume carrying the application file, loads that
++  file's PE32 section and starts it. Starting the application means BDS never
++  reaches its boot-option loop, so the platform cannot fall into the unable-to-
++  boot path while the application is there.
++
++  Everything is reported through DEBUG at ERROR level: this board renders no
++  ConOut, and its SerialPortLib draws DEBUG text into the framebuffer, so that
++  channel is the only readable one during bring-up. The prefix stays stable so
++  a boot log can be matched against this source.
++
++  Limits: the direct start loads the application image with
++  LoadImage(TRUE, gImageHandle, NULL, ...), which the DXE core accepts because
++  the application and BDS live in the same firmware volume. Image
++  authentication is whatever the platform DXE core already enforces for the FV;
++  this changes the start site, not the trust decision. If the application
++  returns, the status is printed and BDS continues with its own boot options --
++  that return is a bring-up signal, not a supported state.
++
++  Copyright (c) 2026, UniXNU contributors. All rights reserved.
++  SPDX-License-Identifier: BSD-2-Clause-Patent
++**/
++
++#ifndef ONYX_BOOT_PATH_HOST
++#include <PiDxe.h>
++
++#include <Library/BaseLib.h>
++#include <Library/DebugLib.h>
++#include <Library/DeviceBootManagerLib.h>
++#include <Library/MemoryAllocationLib.h>
++#include <Library/PcdLib.h>
++#include <Library/UefiBootServicesTableLib.h>
++#include <Library/UefiLib.h>
++#include <Pi/PiFirmwareFile.h>
++#include <Protocol/FirmwareVolume2.h>
++#include <Protocol/LoadedImage.h>
++#endif
++
++#define ONYX_BOOT_PREFIX  "ONYX-BOOT: ac: "
++
++//
++// The application is started at most once per boot: BDS calls
++// PlatformBootManagerAfterConsole() once, but a repeated call must not start a
++// second copy of the boot manager.
++//
++STATIC BOOLEAN  mApplicationStarted = FALSE;
++
++STATIC
++BOOLEAN
++FvHasFile (
++  IN EFI_HANDLE      Handle,
++  IN CONST EFI_GUID  *File
++  )
++{
++  EFI_FIRMWARE_VOLUME2_PROTOCOL  *Fv;
++  EFI_FV_FILETYPE                Type;
++  EFI_FV_FILE_ATTRIBUTES         Attributes;
++  UINT32                         AuthStatus;
++  UINTN                          Size;
++
++  if (EFI_ERROR (gBS->HandleProtocol (Handle, &gEfiFirmwareVolume2ProtocolGuid, (VOID **)&Fv))) {
++    return FALSE;
++  }
++
++  return !EFI_ERROR (Fv->ReadFile (Fv, File, NULL, &Size, &Type, &Attributes, &AuthStatus));
++}
++
++//
++// The volume that carries the application file. The console's own volume is
++// tried first (the application sits next to BDS), then every firmware volume in
++// the system, so a board that publishes the file from a nested volume still
++// works.
++//
++STATIC
++EFI_HANDLE
++FindApplicationVolume (
++  IN CONST EFI_GUID  *File
++  )
++{
++  EFI_HANDLE  *Handles;
++  EFI_HANDLE  Volume;
++  UINTN       Count;
++  UINTN       Index;
++
++  Volume = NULL;
++  if (!EFI_ERROR (gBS->LocateHandleBuffer (ByProtocol, &gEfiFirmwareVolume2ProtocolGuid, NULL, &Count, &Handles))) {
++    for (Index = 0; (Index < Count) && (Volume == NULL); Index++) {
++      if (FvHasFile (Handles[Index], File)) {
++        Volume = Handles[Index];
++      }
++    }
++
++    FreePool (Handles);
++  }
++
++  return Volume;
++}
++
++STATIC
++EFI_STATUS
++StartApplication (
++  IN CONST EFI_GUID  *File
++  )
++{
++  EFI_FIRMWARE_VOLUME2_PROTOCOL  *Fv;
++  EFI_HANDLE                     Volume;
++  VOID                           *Image;
++  UINTN                          ImageSize;
++  UINT32                         AuthStatus;
++  EFI_HANDLE                     Application;
++  EFI_STATUS                     Status;
++
++  Volume      = NULL;
++  Image       = NULL;
++  ImageSize   = 0;
++  AuthStatus  = 0;
++  Application = NULL;
++
++  Volume = FindApplicationVolume (File);
++  if (Volume == NULL) {
++    DEBUG ((DEBUG_ERROR, ONYX_BOOT_PREFIX "no firmware volume carries %g, BDS keeps the boot: %r\n", File, EFI_NOT_FOUND));
++    return EFI_NOT_FOUND;
++  }
++
++  Status = gBS->HandleProtocol (Volume, &gEfiFirmwareVolume2ProtocolGuid, (VOID **)&Fv);
++  if (EFI_ERROR (Status)) {
++    DEBUG ((DEBUG_ERROR, ONYX_BOOT_PREFIX "the volume with %g has no FirmwareVolume2: %r\n", File, Status));
++    return Status;
++  }
++
++  Status = Fv->ReadSection (Fv, File, EFI_SECTION_PE32, 0, &Image, &ImageSize, &AuthStatus);
++  if (EFI_ERROR (Status) || (Image == NULL) || (ImageSize == 0)) {
++    DEBUG ((DEBUG_ERROR, ONYX_BOOT_PREFIX "cannot read the %g PE32 section: %r\n", File, Status));
++    return EFI_ERROR (Status) ? Status : EFI_NOT_FOUND;
++  }
++
++  Status = gBS->LoadImage (TRUE, gImageHandle, NULL, Image, ImageSize, &Application);
++  FreePool (Image);
++  if (EFI_ERROR (Status)) {
++    DEBUG ((DEBUG_ERROR, ONYX_BOOT_PREFIX "LoadImage of %g from its firmware volume failed: %r\n", File, Status));
++    return Status;
++  }
++
++  DEBUG ((DEBUG_ERROR, ONYX_BOOT_PREFIX "starting %g from its firmware volume, BDS does not see a boot option: %r\n", File, EFI_SUCCESS));
++  Status = gBS->StartImage (Application, NULL, NULL);
++  DEBUG ((DEBUG_ERROR, ONYX_BOOT_PREFIX "the application returned: %r\n", Status));
++  return Status;
++}
++
++EFI_HANDLE
++EFIAPI
++DeviceBootManagerBeforeConsole (
++  OUT EFI_DEVICE_PATH_PROTOCOL   **DevicePath,
++  OUT BDS_CONSOLE_CONNECT_ENTRY  **PlatformConsoles
++  )
++{
++  // The console set up by the generic BDS is the one this board can drive.
++  return NULL;
++}
++
++EFI_DEVICE_PATH_PROTOCOL **
++EFIAPI
++DeviceBootManagerAfterConsole (
++  VOID
++  )
++{
++  CONST EFI_GUID  *File;
++  EFI_STATUS      Status;
++
++  if (mApplicationStarted) {
++    DEBUG ((DEBUG_ERROR, ONYX_BOOT_PREFIX "after-console seen twice, the application already ran: %r\n", EFI_ALREADY_STARTED));
++    return NULL;
++  }
++
++  mApplicationStarted = TRUE;
++  File                = (CONST EFI_GUID *)PcdGetPtr (PcdUniXNUApplicationFile);
++  Status              = StartApplication (File);
++
++  //
++  // Nothing else is left to try here: if the application did not take over,
++  // BDS runs its own boot-option path and reports the failure itself.
++  //
++  if (EFI_ERROR (Status)) {
++    DEBUG ((DEBUG_ERROR, ONYX_BOOT_PREFIX "hand-off did not happen, the boot log above says why: %r\n", Status));
++  }
++
++  return NULL;
++}
++
++EFI_DEVICE_PATH_PROTOCOL **
++EFIAPI
++DeviceBootManagerOnDemandConInConnect (
++  VOID
++  )
++{
++  return NULL;
++}
++
++VOID
++EFIAPI
++DeviceBootManagerProcessBootCompletion (
++  OUT EFI_BOOT_MANAGER_LOAD_OPTION  *BootOption
++  )
++{
++  return;
++}
++
++EFI_STATUS
++EFIAPI
++DeviceBootManagerPriorityBoot (
++  IN OUT EFI_BOOT_MANAGER_LOAD_OPTION  *BootOption
++  )
++{
++  return EFI_NOT_FOUND;
++}
++
++VOID
++EFIAPI
++DeviceBootManagerUnableToBoot (
++  VOID
++  )
++{
++  //
++  // Reaching this means the application was never handed control. Say so on
++  // the debug console before BDS paints the no-boot-OS graphic over it.
++  //
++  DEBUG ((DEBUG_ERROR, ONYX_BOOT_PREFIX "BDS has no bootable option: the application was not started: %r\n", EFI_NOT_FOUND));
++}
++
++VOID
++EFIAPI
++DeviceBootManagerBdsEntry (
++  VOID
++  )
++{
++  return;
++}
+diff --git a/Platforms/Xiaomi/onyxPkg/Library/DeviceBootManagerLib/DeviceBootManagerLib.inf b/Platforms/Xiaomi/onyxPkg/Library/DeviceBootManagerLib/DeviceBootManagerLib.inf
+new file mode 100644
+index 0000000..e6f8de4
+--- /dev/null
++++ b/Platforms/Xiaomi/onyxPkg/Library/DeviceBootManagerLib/DeviceBootManagerLib.inf
+@@ -0,0 +1,38 @@
++## @file
++#  onyx device boot manager: hands control from platform BDS to UniXNU.
++#
++#  Copyright (c) 2026, UniXNU contributors. All rights reserved.
++#  SPDX-License-Identifier: BSD-2-Clause-Patent
++##
++
++[Defines]
++  INF_VERSION    = 0x00010019
++  BASE_NAME      = DeviceBootManagerLib
++  FILE_GUID      = B440FF7B-2DBC-482A-B818-1490F56DB0DA
++  MODULE_TYPE    = DXE_DRIVER
++  VERSION_STRING = 0.1
++  LIBRARY_CLASS  = DeviceBootManagerLib|DXE_DRIVER
++
++[Sources]
++  DeviceBootManagerLib.c
++
++[Packages]
++  MdePkg/MdePkg.dec
++  MdeModulePkg/MdeModulePkg.dec
++  MsCorePkg/MsCorePkg.dec
++  UniXNUPkg/UniXNUPkg.dec
++
++[LibraryClasses]
++  BaseLib
++  DebugLib
++  MemoryAllocationLib
++  PcdLib
++  UefiBootServicesTableLib
++  UefiLib
++
++[Protocols]
++  gEfiFirmwareVolume2ProtocolGuid  ## CONSUMES
++  gEfiLoadedImageProtocolGuid      ## CONSUMES
++
++[Pcd]
++  gUniXNUPkgTokenSpaceGuid.PcdUniXNUApplicationFile  ## CONSUMES
+diff --git a/Platforms/Xiaomi/onyxPkg/onyx.dsc b/Platforms/Xiaomi/onyxPkg/onyx.dsc
+index 8c2897d..e9572e1 100644
+--- a/Platforms/Xiaomi/onyxPkg/onyx.dsc
++++ b/Platforms/Xiaomi/onyxPkg/onyx.dsc
+@@ -100,6 +100,15 @@
+   AssertLib|AdvLoggerPkg/Library/AssertLib/AssertLib.inf
+   QrEncoderLib|MsGraphicsPkg/Library/QrEncoderLib/QrEncoderLib.inf
+ 
++  #
++  # The generic BDS only signals ReadyToBoot inside EfiBootManagerBoot(), so a
++  # firmware hook that waits for it never runs when no boot option can be
++  # started -- the exact case that ends in PlatformBootManagerUnableToBoot() and
++  # the grey screen. onyx therefore hands off from PlatformBootManagerAfterConsole()
++  # itself, which BDS calls once per boot before it looks at any boot option.
++  #
++  DeviceBootManagerLib|onyxPkg/Library/DeviceBootManagerLib/DeviceBootManagerLib.inf
++
+ # Bring-up draws DXE debug output on the framebuffer through the platform
+ # SerialPortLib. Routing it into the Advanced Logger RAM buffer instead makes the
+ # QR exporter the only reader, and that exporter needs a working menu, so a stall

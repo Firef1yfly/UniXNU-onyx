@@ -1,6 +1,13 @@
+# onyx port 0011: bring-up report DXE driver
+#
+# Scope: prints the boot-option state that decides what BDS boots, through
+#   DEBUG at ERROR level (the only channel that reaches the panel), stalls so
+#   the text stays readable and then resets cold.
+# Limits: diagnostic build only, temporary. The stall and reset are deliberate:
+#   remove the INF from the DSC/FDF once BDS is understood.
 diff --git a/Platforms/Xiaomi/onyxPkg/Drivers/OnyxBringupReportDxe/OnyxBringupReportDxe.c b/Platforms/Xiaomi/onyxPkg/Drivers/OnyxBringupReportDxe/OnyxBringupReportDxe.c
 new file mode 100644
-index 0000000..dc4c59c
+index 0000000..4c1f0aa
 --- /dev/null
 +++ b/Platforms/Xiaomi/onyxPkg/Drivers/OnyxBringupReportDxe/OnyxBringupReportDxe.c
 @@ -0,0 +1,163 @@
@@ -162,8 +169,8 @@ index 0000000..dc4c59c
 +  // stays dark instead of returning to Android proves the driver executed, which
 +  // a grey panel cannot show.
 +  //
-+  gBS->Stall (3 * 1000 * 1000);
-+  gRT->ResetSystem (EfiResetShutdown, EFI_SUCCESS, 0, NULL);
++  gBS->Stall (5 * 1000 * 1000);
++  gRT->ResetSystem (EfiResetCold, EFI_SUCCESS, 0, NULL);
 +  CpuDeadLoop ();
 +  return EFI_SUCCESS;
 +}

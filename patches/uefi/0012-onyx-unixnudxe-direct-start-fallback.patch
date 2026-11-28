@@ -1,0 +1,540 @@
+# onyx port 0012: UniXNUDxe falls back to starting the application directly
+#
+# Scope: UniXNUPkg/Driver/UniXNUDxe registers Boot#### for the UniXNU
+#   application exactly as before. When that registration cannot be trusted -
+#   the application's firmware volume has no device path, or SetVariable fails
+#   for Boot####/BootOrder - the driver keeps the volume handle, arms a
+#   ReadyToBoot notification and starts the application's PE32 section with
+#   LoadImage(TRUE, gImageHandle, NULL, ...) + StartImage exactly once.
+#   EndOfDxe is hooked only to log the armed state, because on this platform it
+#   is signalled before the platform registers its own default options. Right
+#   before starting, ReadyToBoot reads BootOrder back and stands down when the
+#   selected option is listed there: BDS signals that event immediately before
+#   it would start the option, so a failed BootOrder write must not be read as
+#   "BDS will not boot us". Every decision prints a DEBUG_ERROR line prefixed
+#   "ONYX-BOOT: ".
+# Limits: the fallback is not a second boot manager; it does not run when
+#   Boot#### and BootOrder were written, so a working registration boot still
+#   proves BDS did the work. It requires the application and this driver to be
+#   in the same firmware volume (LoadImage with no device path), it does not
+#   change image authentication, and it is unverified on hardware.
+# Note: UniXNUPkg is an external UniXNU checkout linked into the Mu-Silicium
+#   tree; this patch edits it there, and the DSC/FDF wiring for the driver is
+#   already in patch 0009.
+# Apply: in the UniXNU checkout itself, not through the Mu tree's mount:
+#     ln -s <UniXNU>/package/UniXNUPkg <Mu>/UniXNUPkg   # for the build
+#     git -C <UniXNU> apply --directory=package 0012-onyx-unixnudxe-*.patch
+#   The paths below are written as UniXNUPkg/... because that is the mount's
+#   name, so the core tree needs --directory=package (the checkout holds them
+#   under package/UniXNUPkg). Pointing `git -C <Mu> apply` at them does not
+#   work: git refuses to write through a symlink that leaves the work tree
+#   ("affected file is outside the symlink"), so the mount must be linked after
+#   this patch lands rather than used as the apply target.
+# Note: this driver compiles against the tree that builds it. Its includes must
+#   use Mu-Silicium's MdePkg spelling (<Protocol/FirmwareVolume2.h>), not the
+#   legacy <Protocol/FirmwareVolume2Protocol.h>, which that tree does not carry.
+diff --git a/UniXNUPkg/Driver/UniXNUDxe/UniXNUDxe.c b/UniXNUPkg/Driver/UniXNUDxe/UniXNUDxe.c
+index 213602a..5fceb3c 100644
+--- a/UniXNUPkg/Driver/UniXNUDxe/UniXNUDxe.c
++++ b/UniXNUPkg/Driver/UniXNUDxe/UniXNUDxe.c
+@@ -6,12 +6,41 @@
+   whose variable store is RAM-backed the option is simply re-created on every
+   boot.
+ 
++  On the onyx port BDS never reached the application even though both
++  variables were written, so registration can no longer be the only way in.
++  The driver now falls back to starting the application image directly out of
++  its firmware volume when the registration cannot be trusted:
++
++    - the firmware volume carrying the application has no device path, so no
++      Boot#### can point at it, or
++    - gRT->SetVariable fails for Boot#### or for BootOrder.
++
++  The fallback is armed only in those cases and acts once, on the platform's
++  ReadyToBoot event group, which BDS signals after its own default boot-option
++  registration (MsBootOptionsLibRegisterDefaultBootOptions) and after console
++  connect, but before it gives up with PlatformBootManagerUnableToBoot. When
++  the primary path succeeds nothing is armed, so a working Boot#### boot still
++  proves that BDS started UniXNU. Right before starting, the driver reads
++  BootOrder back and stands down if its own option is listed there, because a
++  failed BootOrder write does not prove BDS will not boot it.
++
++  Limits: the direct start loads the PE32 section of the application file with
++  LoadImage(TRUE, gImageHandle, NULL, ...), which the DXE core accepts because
++  the application and this driver live in the same firmware volume. If that
++  volume is gone, or the file is not an image LoadImage can accept, the
++  fallback reports the EFI_STATUS and BDS keeps its normal failure path. This
++  changes where the application is started from, not whether the image is
++  trusted: image authentication is whatever the platform DXE core already
++  enforces for the FV.
++
+   Copyright (c) 2026, UniXNU contributors. All rights reserved.
+   SPDX-License-Identifier: BSD-2-Clause-Patent
+ **/
+ 
++#ifndef ONYX_BOOT_PATH_HOST
+ #include <PiDxe.h>
+ 
++#include <Guid/EventGroup.h>
+ #include <Guid/GlobalVariable.h>
+ #include <Library/BaseLib.h>
+ #include <Library/BaseMemoryLib.h>
+@@ -23,11 +52,21 @@
+ #include <Library/UefiBootServicesTableLib.h>
+ #include <Library/UefiLib.h>
+ #include <Library/UefiRuntimeServicesTableLib.h>
++#include <Pi/PiFirmwareFile.h>
+ #include <Protocol/FirmwareVolume2.h>
+ #include <Protocol/LoadedImage.h>
++#endif
+ 
+ #define OPTION_ATTRIBUTES  (EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_RUNTIME_ACCESS)
+ 
++//
++// Every decision this driver makes is reported through DEBUG at ERROR level:
++// the platform produces no console output (ConOut renders nothing on this
++// board) but its SerialPortLib draws DEBUG text into the framebuffer, so this
++// prefix is the only readable channel during bring-up. Keep it stable.
++//
++#define ONYX_BOOT_PREFIX  "ONYX-BOOT: "
++
+ //
+ // Optional data of the boot option; the application treats it as "started
+ // by firmware". Keep in sync with UniXNU.c.
+@@ -35,6 +74,25 @@
+ STATIC CONST CHAR16  mFirmwareMarker[] = L"unixnu:firmware";
+ STATIC CONST CHAR16  mDescription[]    = L"UniXNU";
+ 
++//
++// Fallback state. mFallbackArmed stays FALSE whenever Boot#### and BootOrder
++// were both written; mFallbackRan makes the direct start happen at most once
++// even if a signalled event group is signalled again.
++//
++STATIC BOOLEAN      mFallbackArmed   = FALSE;
++STATIC BOOLEAN      mFallbackRan     = FALSE;
++STATIC EFI_HANDLE   mFallbackVolume  = NULL;
++STATIC CONST CHAR8  *mFallbackReason = "primary path";
++
++//
++// The Boot#### number this driver selected. It is re-checked against BootOrder
++// right before the fallback would start anything: a run where the option was
++// already registered but a later write failed must not start the application
++// while BDS is about to start the very same option.
++//
++STATIC UINT16   mFallbackNumber      = 0;
++STATIC BOOLEAN  mFallbackNumberValid = FALSE;
++
+ STATIC
+ BOOLEAN
+ FvHasFile (
+@@ -56,25 +114,27 @@ FvHasFile (
+ }
+ 
+ //
+-// Device path of the application file: our own FV first, then any FV.
++// Firmware volume holding the application: our own FV first, then any FV.
++// The handle is returned even when it has no device path, because the direct
++// start needs exactly that volume; only the Boot#### path needs the path.
+ //
+ STATIC
+-EFI_DEVICE_PATH_PROTOCOL *
+-FindApplication (
++EFI_HANDLE
++FindApplicationVolume (
+   IN EFI_HANDLE  ImageHandle
+   )
+ {
+-  EFI_LOADED_IMAGE_PROTOCOL          *Loaded;
+-  CONST EFI_GUID                     *File;
+-  EFI_HANDLE                         Fv;
+-  EFI_HANDLE                         *Handles;
+-  UINTN                              Count;
+-  UINTN                              Index;
+-  MEDIA_FW_VOL_FILEPATH_DEVICE_PATH  Node;
++  EFI_LOADED_IMAGE_PROTOCOL  *Loaded;
++  CONST EFI_GUID             *File;
++  EFI_HANDLE                 Fv;
++  EFI_HANDLE                 *Handles;
++  UINTN                      Count;
++  UINTN                      Index;
+ 
+   File = (CONST EFI_GUID *)PcdGetPtr (PcdUniXNUApplicationFile);
+   Fv   = NULL;
+   if (!EFI_ERROR (gBS->HandleProtocol (ImageHandle, &gEfiLoadedImageProtocolGuid, (VOID **)&Loaded)) &&
++      (Loaded->DeviceHandle != NULL) &&
+       FvHasFile (Loaded->DeviceHandle, File))
+   {
+     Fv = Loaded->DeviceHandle;
+@@ -92,12 +152,197 @@ FindApplication (
+     FreePool (Handles);
+   }
+ 
+-  if ((Fv == NULL) || (DevicePathFromHandle (Fv) == NULL)) {
+-    return NULL;
++  return Fv;
++}
++
++//
++// Read the application's PE32 section out of the volume, load it and start it.
++//
++STATIC
++EFI_STATUS
++StartApplicationFromVolume (
++  IN EFI_HANDLE   VolumeHandle,
++  IN CONST CHAR8  *Reason
++  )
++{
++  EFI_FIRMWARE_VOLUME2_PROTOCOL  *Fv;
++  CONST EFI_GUID                 *File;
++  VOID                           *Image;
++  UINTN                          ImageSize;
++  UINT32                         AuthStatus;
++  EFI_HANDLE                     Application;
++  EFI_STATUS                     Status;
++
++  File        = (CONST EFI_GUID *)PcdGetPtr (PcdUniXNUApplicationFile);
++  Fv          = NULL;
++  Image       = NULL;
++  ImageSize   = 0;
++  AuthStatus  = 0;
++  Application = NULL;
++
++  Status = gBS->HandleProtocol (VolumeHandle, &gEfiFirmwareVolume2ProtocolGuid, (VOID **)&Fv);
++  if (EFI_ERROR (Status)) {
++    DEBUG ((DEBUG_ERROR, ONYX_BOOT_PREFIX "fallback: no FirmwareVolume2 on the application volume (%a): %r\n", Reason, Status));
++    return Status;
+   }
+ 
+-  EfiInitializeFwVolDevicepathNode (&Node, File);
+-  return AppendDevicePathNode (DevicePathFromHandle (Fv), (EFI_DEVICE_PATH_PROTOCOL *)&Node);
++  Status = Fv->ReadSection (Fv, File, EFI_SECTION_PE32, 0, &Image, &ImageSize, &AuthStatus);
++  if (EFI_ERROR (Status) || (Image == NULL) || (ImageSize == 0)) {
++    DEBUG ((DEBUG_ERROR, ONYX_BOOT_PREFIX "fallback: cannot read the %g PE32 section (%a): %r\n", File, Reason, Status));
++    return EFI_ERROR (Status) ? Status : EFI_NOT_FOUND;
++  }
++
++  Status = gBS->LoadImage (TRUE, gImageHandle, NULL, Image, ImageSize, &Application);
++  FreePool (Image);
++  if (EFI_ERROR (Status)) {
++    DEBUG ((DEBUG_ERROR, ONYX_BOOT_PREFIX "fallback: LoadImage of %g from its volume failed (%a): %r\n", File, Reason, Status));
++    return Status;
++  }
++
++  DEBUG ((DEBUG_ERROR, ONYX_BOOT_PREFIX "fallback: starting %g directly from its firmware volume (%a): %r\n", File, Reason, EFI_SUCCESS));
++  Status = gBS->StartImage (Application, NULL, NULL);
++  return Status;
++}
++
++STATIC
++VOID
++EFIAPI
++OnyxBootEndOfDxeNotify (
++  IN EFI_EVENT  Event,
++  IN VOID       *Context
++  )
++{
++  //
++  // EndOfDxe is signalled inside PlatformBootManagerBeforeConsole, before the
++  // platform registers its own default boot options, so it only records the
++  // armed state. Starting the application there would race that registration
++  // and would run before console connect.
++  //
++  DEBUG ((
++    DEBUG_ERROR,
++    ONYX_BOOT_PREFIX "EndOfDxe, fallback %a: %r\n",
++    (mFallbackArmed && !mFallbackRan) ? "armed, waiting for ReadyToBoot" : "not needed",
++    EFI_SUCCESS
++    ));
++}
++
++STATIC
++BOOLEAN
++BootOrderHasOption (
++  IN UINT16  Number
++  )
++{
++  UINT16   *Order;
++  UINTN    OrderSize;
++  UINTN    Index;
++  BOOLEAN  Found;
++
++  Order     = NULL;
++  OrderSize = 0;
++  if (EFI_ERROR (GetEfiGlobalVariable2 (EFI_BOOT_ORDER_VARIABLE_NAME, (VOID **)&Order, &OrderSize)) ||
++      (Order == NULL))
++  {
++    return FALSE;
++  }
++
++  Found = FALSE;
++  for (Index = 0; (Index < OrderSize / sizeof (UINT16)) && !Found; Index++) {
++    Found = (Order[Index] == Number);
++  }
++
++  FreePool (Order);
++  return Found;
++}
++
++STATIC
++VOID
++EFIAPI
++OnyxBootReadyToBootNotify (
++  IN EFI_EVENT  Event,
++  IN VOID       *Context
++  )
++{
++  EFI_STATUS  Status;
++
++  if (!mFallbackArmed) {
++    DEBUG ((DEBUG_ERROR, ONYX_BOOT_PREFIX "ReadyToBoot, no fallback armed, BDS owns the boot: %r\n", EFI_SUCCESS));
++    return;
++  }
++
++  if (mFallbackRan) {
++    DEBUG ((DEBUG_ERROR, ONYX_BOOT_PREFIX "ReadyToBoot signalled again, fallback already ran: %r\n", EFI_ALREADY_STARTED));
++    return;
++  }
++
++  //
++  // BDS signals ReadyToBoot itself, immediately before it would start the boot
++  // option, so this is the last moment where "who starts the application" can
++  // still be decided. A failed BootOrder write does not prove BDS will not boot
++  // us: the option may already have been in BootOrder (this driver reuses an
++  // identical Boot####). Starting here as well would run the application twice,
++  // so look at what BDS is actually going to do.
++  //
++  if (mFallbackNumberValid && BootOrderHasOption (mFallbackNumber)) {
++    mFallbackRan = TRUE;
++    DEBUG ((DEBUG_ERROR, ONYX_BOOT_PREFIX "Boot%04x is in BootOrder after all, BDS starts it, fallback disarmed: %r\n", mFallbackNumber, EFI_SUCCESS));
++    return;
++  }
++
++  //
++  // Set before starting: a nested or repeated signal must not start twice.
++  //
++  mFallbackRan = TRUE;
++  Status       = StartApplicationFromVolume (mFallbackVolume, mFallbackReason);
++  DEBUG ((DEBUG_ERROR, ONYX_BOOT_PREFIX "fallback direct start finished: %r\n", Status));
++}
++
++//
++// Arm the direct start. Two event hooks, one action: EndOfDxe is logged for
++// the panel, ReadyToBoot performs the start. Both are signalled once per boot
++// by the DXE core/BDS; mFallbackRan makes repeats harmless.
++//
++STATIC
++VOID
++ArmFallback (
++  IN EFI_HANDLE   VolumeHandle,
++  IN CONST CHAR8  *Reason
++  )
++{
++  EFI_STATUS  Status;
++  EFI_EVENT   Event;
++
++  mFallbackArmed  = TRUE;
++  mFallbackVolume = VolumeHandle;
++  mFallbackReason = Reason;
++
++  Event  = NULL;
++  Status = gBS->CreateEventEx (
++                  EVT_NOTIFY_SIGNAL,
++                  TPL_CALLBACK,
++                  OnyxBootEndOfDxeNotify,
++                  NULL,
++                  &gEfiEndOfDxeEventGroupGuid,
++                  &Event
++                  );
++  if (EFI_ERROR (Status)) {
++    DEBUG ((DEBUG_ERROR, ONYX_BOOT_PREFIX "cannot hook EndOfDxe, fallback will rely on ReadyToBoot: %r\n", Status));
++  }
++
++  Event  = NULL;
++  Status = gBS->CreateEventEx (
++                  EVT_NOTIFY_SIGNAL,
++                  TPL_CALLBACK,
++                  OnyxBootReadyToBootNotify,
++                  NULL,
++                  &gEfiEventReadyToBootGuid,
++                  &Event
++                  );
++  if (EFI_ERROR (Status)) {
++    DEBUG ((DEBUG_ERROR, ONYX_BOOT_PREFIX "cannot hook ReadyToBoot, fallback cannot run: %r\n", Status));
++    return;
++  }
++
++  DEBUG ((DEBUG_ERROR, ONYX_BOOT_PREFIX "fallback armed (%a), will start the application at ReadyToBoot: %r\n", Reason, EFI_SUCCESS));
+ }
+ 
+ //
+@@ -141,31 +386,56 @@ UniXNUDxeEntry (
+   IN EFI_SYSTEM_TABLE  *SystemTable
+   )
+ {
+-  EFI_STATUS                Status;
+-  EFI_DEVICE_PATH_PROTOCOL  *Path;
+-  VOID                      *Option;
+-  UINTN                     OptionSize;
+-  UINT16                    *Order;
+-  UINTN                     OrderSize;
+-  UINT16                    *NewOrder;
+-  UINTN                     Index;
+-  UINTN                     Out;
+-  UINT16                    Number;
+-  CHAR16                    Name[sizeof ("Boot####")];
+-  VOID                      *Existing;
+-  UINTN                     ExistingSize;
+-  BOOLEAN                   Found;
+-
+-  Path = FindApplication (ImageHandle);
++  EFI_STATUS                          Status;
++  EFI_HANDLE                          FvHandle;
++  EFI_DEVICE_PATH_PROTOCOL            *Path;
++  VOID                                *Option;
++  UINTN                               OptionSize;
++  UINT16                              *Order;
++  UINTN                               OrderSize;
++  UINT16                              *NewOrder;
++  UINTN                               Index;
++  UINTN                               Out;
++  UINT16                              Number;
++  CHAR16                              Name[sizeof ("Boot####")];
++  VOID                                *Existing;
++  UINTN                               ExistingSize;
++  BOOLEAN                             Found;
++  MEDIA_FW_VOL_FILEPATH_DEVICE_PATH   Node;
++
++  FvHandle = FindApplicationVolume (ImageHandle);
++  if (FvHandle == NULL) {
++    Status = EFI_NOT_FOUND;
++    DEBUG ((DEBUG_ERROR, ONYX_BOOT_PREFIX "application %g is in no firmware volume, nothing to register or start: %r\n", PcdGetPtr (PcdUniXNUApplicationFile), Status));
++    return Status;
++  }
++
++  if (DevicePathFromHandle (FvHandle) == NULL) {
++    //
++    // No device path means no Boot#### can name this volume, so registration
++    // cannot work here; arm the fallback and let the driver stay resident.
++    //
++    DEBUG ((DEBUG_ERROR, ONYX_BOOT_PREFIX "firmware volume with %g has no device path, Boot#### cannot be written: %r\n", PcdGetPtr (PcdUniXNUApplicationFile), EFI_NOT_FOUND));
++    ArmFallback (FvHandle, "firmware volume has no device path");
++    return EFI_SUCCESS;
++  }
++
++  EfiInitializeFwVolDevicepathNode (&Node, (CONST EFI_GUID *)PcdGetPtr (PcdUniXNUApplicationFile));
++  Path = AppendDevicePathNode (DevicePathFromHandle (FvHandle), (EFI_DEVICE_PATH_PROTOCOL *)&Node);
+   if (Path == NULL) {
+-    DEBUG ((DEBUG_ERROR, "UniXNUDxe: application %g not found in any FV\n", PcdGetPtr (PcdUniXNUApplicationFile)));
+-    return EFI_NOT_FOUND;
++    Status = EFI_OUT_OF_RESOURCES;
++    DEBUG ((DEBUG_ERROR, ONYX_BOOT_PREFIX "cannot build the application device path: %r\n", Status));
++    ArmFallback (FvHandle, "device path allocation failed");
++    return EFI_SUCCESS;
+   }
+ 
+   Option = BuildLoadOption (Path, &OptionSize);
+   FreePool (Path);
+   if (Option == NULL) {
+-    return EFI_OUT_OF_RESOURCES;
++    Status = EFI_OUT_OF_RESOURCES;
++    DEBUG ((DEBUG_ERROR, ONYX_BOOT_PREFIX "cannot build the Boot#### value: %r\n", Status));
++    ArmFallback (FvHandle, "boot option allocation failed");
++    return EFI_SUCCESS;
+   }
+ 
+   Order     = NULL;
+@@ -201,20 +471,45 @@ UniXNUDxeEntry (
+ 
+     Status = gRT->SetVariable (Name, &gEfiGlobalVariableGuid, OPTION_ATTRIBUTES, OptionSize, Option);
+     if (EFI_ERROR (Status)) {
+-      DEBUG ((DEBUG_ERROR, "UniXNUDxe: cannot write %s: %r\n", Name, Status));
++      DEBUG ((DEBUG_ERROR, ONYX_BOOT_PREFIX "cannot write %s, direct-start fallback armed: %r\n", Name, Status));
+       FreePool (Option);
+-      return Status;
++      if (Order != NULL) {
++        FreePool (Order);
++      }
++
++      ArmFallback (FvHandle, "Boot#### write failed");
++
++      //
++      // Not an error return: the DXE dispatcher unloads a driver whose entry
++      // point fails, which would free the code the fallback callbacks live in.
++      // The driver has not failed, it has moved the work to a later event.
++      //
++      return EFI_SUCCESS;
+     }
+   }
+ 
+   FreePool (Option);
+ 
++  //
++  // From here on the fallback, if it has to be armed, knows which option BDS
++  // would boot and can defer to it.
++  //
++  mFallbackNumber      = Number;
++  mFallbackNumberValid = TRUE;
++
+   //
+   // BootOrder = Number, then everything else in its old order.
+   //
+   NewOrder = AllocatePool (OrderSize + sizeof (UINT16));
+   if (NewOrder == NULL) {
+-    return EFI_OUT_OF_RESOURCES;
++    Status = EFI_OUT_OF_RESOURCES;
++    DEBUG ((DEBUG_ERROR, ONYX_BOOT_PREFIX "cannot allocate a new BootOrder: %r\n", Status));
++    ArmFallback (FvHandle, "BootOrder allocation failed");
++    if (Order != NULL) {
++      FreePool (Order);
++    }
++
++    return EFI_SUCCESS;
+   }
+ 
+   NewOrder[0] = Number;
+@@ -226,12 +521,17 @@ UniXNUDxeEntry (
+   }
+ 
+   Status = gRT->SetVariable (EFI_BOOT_ORDER_VARIABLE_NAME, &gEfiGlobalVariableGuid, OPTION_ATTRIBUTES, Out * sizeof (UINT16), NewOrder);
+-  DEBUG ((DEBUG_INFO, "UniXNUDxe: Boot%04x first in BootOrder: %r\n", Number, Status));
+-
+   FreePool (NewOrder);
+   if (Order != NULL) {
+     FreePool (Order);
+   }
+ 
++  if (EFI_ERROR (Status)) {
++    DEBUG ((DEBUG_ERROR, ONYX_BOOT_PREFIX "cannot write BootOrder, direct-start fallback armed: %r\n", Status));
++    ArmFallback (FvHandle, "BootOrder write failed");
++    return EFI_SUCCESS;
++  }
++
++  DEBUG ((DEBUG_ERROR, ONYX_BOOT_PREFIX "Boot%04x registered first in BootOrder, BDS starts it, fallback not armed: %r\n", Number, Status));
+   return Status;
+ }
+diff --git a/UniXNUPkg/Driver/UniXNUDxe/UniXNUDxe.inf b/UniXNUPkg/Driver/UniXNUDxe/UniXNUDxe.inf
+index f1dd567..cc6f6fb 100644
+--- a/UniXNUPkg/Driver/UniXNUDxe/UniXNUDxe.inf
++++ b/UniXNUPkg/Driver/UniXNUDxe/UniXNUDxe.inf
+@@ -9,6 +9,12 @@
+ #  "unixnu:firmware" as optional data, which tells the application it was
+ #  started by firmware.
+ #
++#  When that registration cannot work on a board (the application's firmware
++#  volume has no device path, or the variable store rejects Boot####/BootOrder)
++#  the driver instead starts the application's PE32 section directly from the
++#  volume on the ReadyToBoot event group. The fallback is armed only in those
++#  cases, so a working Boot#### boot still proves BDS started the application.
++#
+ #  Copyright (c) 2026, UniXNU contributors. All rights reserved.
+ #  SPDX-License-Identifier: BSD-2-Clause-Patent
+ ##
+@@ -43,6 +49,8 @@
+ 
+ [Guids]
+   gEfiGlobalVariableGuid              ## SOMETIMES_PRODUCES ## Variable:L"Boot####" L"BootOrder"
++  gEfiEndOfDxeEventGroupGuid          ## SOMETIMES_CONSUMES ## Event:gEfiEndOfDxeEventGroupGuid
++  gEfiEventReadyToBootGuid            ## SOMETIMES_CONSUMES ## Event:gEfiEventReadyToBootGuid
+ 
+ [Protocols]
+   gEfiFirmwareVolume2ProtocolGuid     ## CONSUMES

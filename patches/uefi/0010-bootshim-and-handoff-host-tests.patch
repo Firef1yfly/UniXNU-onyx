@@ -1,3 +1,10 @@
+# onyx port 0010: host tests for the BootShim and the SEC handoff guard
+#
+# Scope: mock ABI compiled on the host (no EDK2 build, no hardware) for
+#   OnyxHandoff.c, plus the BootShim source/compile regression in
+#   Tests/test_bootshim.py.
+# Limits: fixtures, not device evidence. They prove the code paths and the
+#   board-map cross-check, not that the firmware boots.
 diff --git a/Tests/OnyxHandoff/onyx_host_mock.c b/Tests/OnyxHandoff/onyx_host_mock.c
 new file mode 100644
 index 0000000..be9141e

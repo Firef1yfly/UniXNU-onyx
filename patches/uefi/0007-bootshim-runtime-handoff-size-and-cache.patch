@@ -1,8 +1,18 @@
+# onyx port 0007: BootShim transport, size accounting and cache maintenance
+#
+# Scope: copy the firmware into FD_BASE with overlap handled in both
+#   directions, flush the copied range to the point of coherency, invalidate
+#   I-cache and branch. FD_SIZE must be a multiple of the 16-byte copy width.
+# Limits: no hardware claim; the shim's effect is only proven by a device boot.
+# Fold: this patch absorbs the BootShim.S step that used to be duplicated in
+#   0002-onyx-qr-advanced-logger-diagnostic.patch (identical hunk, stale blob).
+#   With 0001 it is the whole BootShim change; nothing else in the series edits
+#   BootShim.S.
 diff --git a/BootShim/BootShim.S b/BootShim/BootShim.S
-index aa72c1f..3e557de 100644
+index a506fa6..3e557de 100644
 --- a/BootShim/BootShim.S
 +++ b/BootShim/BootShim.S
-@@ -1,32 +1,59 @@
+@@ -1,30 +1,59 @@
 +/* Boot transport derived from UniXNU/uefi-sheng b303410c8e401fc9419ae65a024356ed09a438ef.
 + * Keep bootloader x0 unchanged: an appended stock DTB has stale initrd addresses.
 + */
@@ -22,7 +32,7 @@ index aa72c1f..3e557de 100644
 -
 +  .quad FD_BASE
  _StackSize:
--  .quad FD_SIZE         /* Image Size */
+-  .quad FD_SIZE + (_Payload - _Head) /* Shim plus firmware, excludes appended FDT */
 -  .quad 0               /* Flags */
 -  .quad 0               /* Reserved */
 -  .quad 0               /* Reserved */
@@ -39,11 +49,9 @@ index aa72c1f..3e557de 100644
  #endif
  
  _Start:
--  /* Unconditionally use the appended DTB at _Payload + FD_SIZE.
--     The bootloader-supplied x0 points at its own FDT which lacks
--     linux,initrd-start, so force the DTB that ships in boot.img. */
--  ldr   x2, =FD_SIZE
--  add   x0, x1, x2
+-  /* Preserve bootloader x0, including runtime memory and initrd fixups.
+-     An appended static DTB is not a substitute for the runtime handoff.
+-     Missing initrd must be diagnosed, not hidden by selecting stale FDT data. */
    mov   x4, x1
    ldr   x5, =FD_BASE
    cmp   x4, x5
@@ -79,7 +87,7 @@ index aa72c1f..3e557de 100644
  
  _CopyLoop:
    ldp   x2, x3, [x4], #16
-@@ -36,12 +63,34 @@ _CopyLoop:
+@@ -34,12 +63,34 @@ _CopyLoop:
    ldr   x5, =FD_BASE
  
  _Entry:

@@ -1,3 +1,18 @@
+# onyx port 0009: onyx DSC/FDF wiring for UniXNU, diagnostics and the guard
+#
+# Scope: debug level kept at the default (ConOut draws nothing on this board),
+#   UniXNU PCDs, the empirically working framebuffer geometry, the UniXNU
+#   library wiring, the bring-up/diagnostic drivers in DSC and FDF, /Brepro
+#   reproducible linking, and the SEC compile switch ONYX_FDT_HANDOFF=1 that
+#   patch 0008 depends on.
+# Limits: the DSC is the canonical one; a guard-disabled experiment must be a
+#   separate, explicitly labelled artefact, never an edit of this file. Dropping
+#   the SEC CC_FLAGS line silently removes the FDT guard from the firmware.
+# Fold: absorbs the onyx DSC/FDF wiring of removed
+#   0002-onyx-qr-advanced-logger-diagnostic.patch (Advanced Logger libraries,
+#   PcdAdvancedLoggerPages, AdvancedLogDxe, PcdUniXNUDeviceModel). That patch's
+#   DebugLib rebinding, OnyxMapDxe placement and SiliciumPkg.dsc.inc edits were
+#   abandoned experiments and are deliberately not in the tree.
 diff --git a/Platforms/Xiaomi/onyxPkg/onyx.dsc b/Platforms/Xiaomi/onyxPkg/onyx.dsc
 index 84c2790..8c2897d 100644
 --- a/Platforms/Xiaomi/onyxPkg/onyx.dsc

@@ -1,4 +1,16 @@
+# onyx port 0001: BootShim preserves the bootloader's runtime FDT (x0)
+#
+# Scope: the ARM64 boot header's image size field covers the shim plus the
+#   firmware (not the appended DTB), and _Start no longer overwrites x0 with
+#   "appended DTB at _Payload + FD_SIZE". The bootloader's runtime FDT carries
+#   the live memory map and initrd fixups, so it is the only correct handoff.
+# Limits: this is one step of the BootShim rewrite. 0007 continues from this
+#   file (overlap-safe copy, cache maintenance, .ltorg) and is the patch to read
+#   for the complete transport. The appended-DTB fallback removal means a
+#   bootloader that passes no FDT now fails visibly instead of booting stale
+#   initrd addresses.
 diff --git a/BootShim/BootShim.S b/BootShim/BootShim.S
+index aa72c1f..a506fa6 100644
 --- a/BootShim/BootShim.S
 +++ b/BootShim/BootShim.S
 @@ -7,7 +7,7 @@ _StackBase:
